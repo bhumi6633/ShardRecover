@@ -22,13 +22,14 @@ void print_help()
                  "  shardrecover fragment <input> --size <bytes> [--overlap <bytes>]\n"
                  "      [--shuffle] [--opaque-names] [--seed <integer>] --output <directory>\n"
                  "  shardrecover reconstruct <fragment-directory> [--min-overlap <bytes>]\n"
-                 "      --output <file>\n"
+                 "      [--strategy <greedy|beam>] [--beam-width <count>]\n"
+                 "      [--candidates <count>] --output <file>\n"
                  "\n"
                  "Commands:\n"
                  "  analyze      Find directional byte overlaps between fragment files\n"
                  "  inspect      Show file size and a hexadecimal byte preview\n"
                  "  fragment     Split a file into fixed-size binary fragments\n"
-                 "  reconstruct  Greedily merge anonymous fragments (exit 2 if incomplete)\n";
+                 "  reconstruct  Merge anonymous fragments with greedy or beam search\n";
 }
 
 void inspect_file(const std::filesystem::path& path)
@@ -120,7 +121,8 @@ int main(int argc, char* argv[])
         } catch (const std::exception& error) {
             std::cerr << "Error: " << error.what() << '\n'
                       << "Usage: shardrecover reconstruct <fragment-directory> "
-                         "[--min-overlap <bytes>] --output <file>\n";
+                         "[--min-overlap <bytes>] [--strategy <greedy|beam>] "
+                         "[--beam-width <count>] [--candidates <count>] --output <file>\n";
             return 1;
         }
     }
