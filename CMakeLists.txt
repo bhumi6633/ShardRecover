@@ -10,6 +10,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(shardrecover_core
     src/binary_file.cpp
+    src/fragment_emitter.cpp
     src/fragment_generator.cpp
 )
 target_include_directories(shardrecover_core PUBLIC include)
