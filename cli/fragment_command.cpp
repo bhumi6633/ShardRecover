@@ -1,6 +1,7 @@
 #include "fragment_command.hpp"
 
 #include "shardrecover/binary_file.hpp"
+#include "shardrecover/fragment_emitter.hpp"
 #include "shardrecover/fragment_generator.hpp"
 
 #include <algorithm>
@@ -10,6 +11,8 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <optional>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -27,6 +30,16 @@ std::size_t parse_byte_count(std::string_view value, std::string_view name)
         throw std::runtime_error("Invalid " + std::string(name) + ": '" + std::string(value) + "'");
     }
     return size;
+}
+
+std::uint64_t parse_seed(std::string_view value)
+{
+    std::uint64_t seed = 0;
+    const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), seed);
+    if (value.empty() || error != std::errc{} || end != value.data() + value.size()) {
+        throw std::runtime_error("Invalid seed: '" + std::string(value) + "'");
+    }
+    return seed;
 }
 
 std::string fragment_filename(std::size_t index, std::size_t width)
@@ -54,6 +67,13 @@ void write_fragment(const std::filesystem::path& path, const Fragment& fragment)
     }
 }
 
+std::uint64_t random_seed()
+{
+    std::random_device source;
+    return (static_cast<std::uint64_t>(source()) << 32U)
+           ^ static_cast<std::uint64_t>(source());
+}
+
 }  // namespace
 
 int run_fragment_command(int argc, char* argv[])
@@ -66,9 +86,12 @@ int run_fragment_command(int argc, char* argv[])
     std::filesystem::path output_path;
     std::size_t fragment_size = 0;
     std::size_t overlap = 0;
+    std::optional<std::uint64_t> requested_seed;
     bool has_size = false;
     bool has_overlap = false;
     bool has_output = false;
+    bool shuffle = false;
+    bool opaque_names = false;
 
     for (int index = 1; index < argc; ++index) {
         const std::string_view option{argv[index]};
@@ -93,6 +116,24 @@ int run_fragment_command(int argc, char* argv[])
             }
             overlap = parse_byte_count(argv[index], "overlap");
             has_overlap = true;
+        } else if (option == "--shuffle") {
+            if (shuffle) {
+                throw std::runtime_error("--shuffle may only be specified once");
+            }
+            shuffle = true;
+        } else if (option == "--opaque-names") {
+            if (opaque_names) {
+                throw std::runtime_error("--opaque-names may only be specified once");
+            }
+            opaque_names = true;
+        } else if (option == "--seed") {
+            if (requested_seed.has_value()) {
+                throw std::runtime_error("--seed may only be specified once");
+            }
+            if (++index >= argc) {
+                throw std::runtime_error("--seed requires a value");
+            }
+            requested_seed = parse_seed(argv[index]);
         } else if (option == "--output") {
             if (has_output) {
                 throw std::runtime_error("--output may only be specified once");
@@ -113,9 +154,24 @@ int run_fragment_command(int argc, char* argv[])
     if (!has_output) {
         throw std::runtime_error("Missing required option: --output <directory>");
     }
+    if (requested_seed.has_value() && !shuffle && !opaque_names) {
+        throw std::runtime_error("--seed requires --shuffle or --opaque-names");
+    }
 
     const auto input = BinaryFile::load(input_path);
-    const auto fragments = FragmentGenerator::generate(input.bytes(), fragment_size, overlap);
+    auto fragments = FragmentGenerator::generate(input.bytes(), fragment_size, overlap);
+
+    const bool uses_randomness = shuffle || opaque_names;
+    const auto seed = uses_randomness
+                          ? requested_seed.value_or(random_seed())
+                          : std::uint64_t{0};
+    if (shuffle) {
+        FragmentEmitter::shuffle(fragments, seed);
+    }
+
+    const auto filenames = opaque_names
+                               ? FragmentEmitter::opaque_filenames(fragments.size(), seed)
+                               : std::vector<std::string>{};
 
     std::error_code error;
     std::filesystem::create_directories(output_path, error);
@@ -129,8 +185,12 @@ int run_fragment_command(int argc, char* argv[])
 
     const auto last_index = fragments.empty() ? 0 : fragments.size() - 1;
     const auto name_width = std::max<std::size_t>(4, std::to_string(last_index).size());
-    for (const auto& fragment : fragments) {
-        write_fragment(output_path / fragment_filename(fragment.index, name_width), fragment);
+    for (std::size_t position = 0; position < fragments.size(); ++position) {
+        const auto& fragment = fragments[position];
+        const auto filename = opaque_names
+                                  ? filenames[position]
+                                  : fragment_filename(fragment.index, name_width);
+        write_fragment(output_path / filename, fragment);
     }
 
     std::cout << "Input: " << input_path.string() << '\n'
@@ -139,6 +199,12 @@ int run_fragment_command(int argc, char* argv[])
               << "Overlap: " << overlap << " bytes\n"
               << "Stride: " << fragment_size - overlap << " bytes\n"
               << "Fragments written: " << fragments.size() << '\n'
+              << "Shuffled: " << (shuffle ? "yes" : "no") << '\n'
+              << "Opaque names: " << (opaque_names ? "yes" : "no") << '\n';
+    if (uses_randomness) {
+        std::cout << "Seed: " << seed << '\n';
+    }
+    std::cout
               << "Output: " << output_path.string() << '\n';
     return 0;
 }

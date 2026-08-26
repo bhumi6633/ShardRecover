@@ -16,7 +16,8 @@ void print_help()
     std::cout << "Usage:\n"
                  "  shardrecover [--help] [--version]\n"
                  "  shardrecover inspect <file>\n"
-                 "  shardrecover fragment <input> --size <bytes> [--overlap <bytes>] --output <directory>\n"
+                 "  shardrecover fragment <input> --size <bytes> [--overlap <bytes>]\n"
+                 "      [--shuffle] [--opaque-names] [--seed <integer>] --output <directory>\n"
                  "\n"
                  "Commands:\n"
                  "  inspect      Show file size and a hexadecimal byte preview\n"
@@ -93,7 +94,8 @@ int main(int argc, char* argv[])
         } catch (const std::exception& error) {
             std::cerr << "Error: " << error.what() << '\n'
                       << "Usage: shardrecover fragment <input> --size <bytes> "
-                         "[--overlap <bytes>] --output <directory>\n";
+                         "[--overlap <bytes>] [--shuffle] [--opaque-names] "
+                         "[--seed <integer>] --output <directory>\n";
             return 1;
         }
     }
