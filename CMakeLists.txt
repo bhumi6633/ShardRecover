@@ -12,6 +12,7 @@ add_library(shardrecover_core
     src/binary_file.cpp
     src/fragment_emitter.cpp
     src/fragment_generator.cpp
+    src/overlap.cpp
 )
 target_include_directories(shardrecover_core PUBLIC include)
 
