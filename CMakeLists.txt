@@ -8,7 +8,10 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_library(shardrecover_core src/binary_file.cpp)
+add_library(shardrecover_core
+    src/binary_file.cpp
+    src/fragment_generator.cpp
+)
 target_include_directories(shardrecover_core PUBLIC include)
 
 add_executable(shardrecover cli/main.cpp)
