@@ -118,6 +118,25 @@ shardrecover::ReconstructionResult reconstruct(const std::filesystem::path& dire
     return shardrecover::GreedyReconstructor::reconstruct(graph, fragment_span);
 }
 
+shardrecover::BeamReconstructionResult reconstruct_with_beam(
+    const std::filesystem::path& directory,
+    const std::vector<TestInput>& inputs,
+    std::size_t minimum_overlap,
+    std::size_t beam_width)
+{
+    std::vector<shardrecover::BinaryFile> files;
+    files.reserve(inputs.size());
+    for (const auto& input : inputs) {
+        const auto path = directory / input.name;
+        write_file(path, input.data);
+        files.push_back(shardrecover::BinaryFile::load(path));
+    }
+
+    const auto fragment_span = std::span<const shardrecover::BinaryFile>{files};
+    const auto graph = shardrecover::FragmentGraph::build(fragment_span, minimum_overlap);
+    return shardrecover::BeamReconstructor::reconstruct(graph, fragment_span, beam_width);
+}
+
 std::vector<std::size_t> path_ids(const shardrecover::ReconstructionResult& result)
 {
     std::vector<std::size_t> ids;
@@ -293,6 +312,135 @@ void test_input_permutation_same_result(const std::filesystem::path& directory)
           "unambiguous input permutation changed reconstruction result");
 }
 
+void test_beam_recovers_adversarial_chain(const std::filesystem::path& directory)
+{
+    const std::vector<TestInput> inputs{
+        {"beam-adversarial-a.bin", bytes("STARTABC")},
+        {"beam-adversarial-b.bin", bytes("ABCEND")},
+        {"beam-adversarial-c.bin", bytes("BCMIDXY")},
+        {"beam-adversarial-d.bin", bytes("XYTAILAB")},
+    };
+
+    const auto greedy = reconstruct(directory, inputs, 2);
+    const auto narrow = reconstruct_with_beam(directory, inputs, 2, 1);
+    const auto beam = reconstruct_with_beam(directory, inputs, 2, 2);
+
+    check(!greedy.complete, "adversarial fixture did not defeat greedy search");
+    check(!narrow.selected.complete, "beam width one unexpectedly escaped greedy choice");
+    check(beam.selected.complete, "beam search did not find the complete candidate");
+    check(beam.selected.bytes == bytes("STARTABCMIDXYTAILABCEND"),
+          "beam search reconstructed incorrect adversarial bytes");
+    check(beam.selected.steps.size() == 4 && beam.selected.total_overlap_bytes == 6,
+          "beam search reported incorrect path metrics");
+    check(!beam.candidates.empty() && beam.candidates.front().complete,
+          "complete candidate was not ranked first");
+}
+
+void test_beam_unambiguous_binary_dataset(const std::filesystem::path& directory)
+{
+    std::mt19937_64 engine(9917);
+    std::vector<std::byte> original;
+    original.reserve(512);
+    for (std::size_t index = 0; index < 512; ++index) {
+        original.push_back(static_cast<std::byte>(engine() & 0xffU));
+    }
+
+    auto fragments = shardrecover::FragmentGenerator::generate(original, 64, 16);
+    shardrecover::FragmentEmitter::shuffle(fragments, 73);
+    const auto names = shardrecover::FragmentEmitter::opaque_filenames(fragments.size(), 73);
+    std::vector<TestInput> inputs;
+    for (std::size_t index = 0; index < fragments.size(); ++index) {
+        inputs.push_back(TestInput{"beam-" + names[index], fragments[index].data});
+    }
+
+    const auto greedy = reconstruct(directory, inputs, 16);
+    const auto beam = reconstruct_with_beam(directory, inputs, 16, 8);
+    check(greedy.complete && greedy.bytes == original, "greedy baseline changed on clear input");
+    check(beam.selected.complete && beam.selected.bytes == original,
+          "beam search failed exact binary recovery with shuffled opaque fragments");
+}
+
+void test_beam_candidate_ranking_and_ties(const std::filesystem::path& directory)
+{
+    const auto ranked = reconstruct_with_beam(
+        directory,
+        {{"rank-source.bin", bytes("XXABC")},
+         {"rank-strong.bin", bytes("ABCZZ")},
+         {"rank-weak.bin", bytes("BCYY")}},
+        2,
+        2);
+    check(ranked.candidates.size() == 2, "expected two terminal ranking candidates");
+    check(ranked.candidates[0].steps.size() == ranked.candidates[1].steps.size()
+              && ranked.candidates[0].total_overlap_bytes == 3
+              && ranked.candidates[1].total_overlap_bytes == 2,
+          "equal-length candidates were not ranked by total overlap");
+
+    const std::vector<TestInput> tied{
+        {"beam-tie-source.bin", bytes("AAXY")},
+        {"beam-tie-z.bin", bytes("XY2")},
+        {"beam-tie-b.bin", bytes("XY1")},
+    };
+    const auto first = reconstruct_with_beam(directory, tied, 2, 2);
+    const auto second = reconstruct_with_beam(directory, tied, 2, 2);
+    check(path_ids(first.selected) == path_ids(second.selected),
+          "beam candidate tie-breaking was not deterministic");
+    check(first.selected.steps.size() == 2 && first.selected.steps[1].node_id == 2,
+          "beam tie did not use deterministic path ordering");
+}
+
+void test_beam_partial_single_and_multiple_starts(const std::filesystem::path& directory)
+{
+    const auto partial = reconstruct_with_beam(
+        directory,
+        {{"multi-a.bin", bytes("ABCDE")},
+         {"multi-b.bin", bytes("CDEFG")},
+         {"multi-z.bin", bytes("ZZZ")}},
+        3,
+        2);
+    check(!partial.selected.complete && partial.selected.steps.size() == 2,
+          "beam search did not choose the best disconnected partial path");
+    check(partial.selected.bytes == bytes("ABCDEFG"),
+          "beam search produced incorrect disconnected partial bytes");
+
+    const std::vector<std::byte> binary{
+        std::byte{0x00}, std::byte{0xff}, std::byte{0x51},
+    };
+    const auto single = reconstruct_with_beam(
+        directory, {{"beam-single.bin", binary}}, 1, 4);
+    check(single.selected.complete && single.selected.steps.size() == 1
+              && single.selected.bytes == binary,
+          "beam search failed a single binary fragment");
+}
+
+void test_beam_never_reuses_fragments(const std::filesystem::path& directory)
+{
+    const auto result = reconstruct_with_beam(
+        directory,
+        {{"reuse-a.bin", bytes("ABAB")},
+         {"reuse-b.bin", bytes("BABA")},
+         {"reuse-c.bin", bytes("ABAX")}},
+        2,
+        8);
+    check_no_reuse(result.selected);
+    for (const auto& candidate : result.candidates) {
+        shardrecover::ReconstructionResult path;
+        path.steps = candidate.steps;
+        check_no_reuse(path);
+    }
+}
+
+void test_beam_rejects_zero_width(const std::filesystem::path& directory)
+{
+    bool rejected = false;
+    try {
+        (void)reconstruct_with_beam(
+            directory, {{"zero-width.bin", bytes("ABC")}}, 1, 0);
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    check(rejected, "beam width zero was accepted");
+}
+
 struct TestCase {
     std::string_view name;
     void (*run)(const std::filesystem::path&);
@@ -316,6 +464,12 @@ int main()
             TestCase{"deterministic tie break", test_deterministic_tie_break},
             TestCase{"overlap merge and containment", test_overlap_merge_and_containment},
             TestCase{"input permutation", test_input_permutation_same_result},
+            TestCase{"beam adversarial recovery", test_beam_recovers_adversarial_chain},
+            TestCase{"beam unambiguous binary dataset", test_beam_unambiguous_binary_dataset},
+            TestCase{"beam candidate ranking and ties", test_beam_candidate_ranking_and_ties},
+            TestCase{"beam partial, single, and starts", test_beam_partial_single_and_multiple_starts},
+            TestCase{"beam fragment reuse prevention", test_beam_never_reuses_fragments},
+            TestCase{"beam width validation", test_beam_rejects_zero_width},
         };
 
         std::size_t failures = 0;
