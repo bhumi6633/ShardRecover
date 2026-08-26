@@ -1,3 +1,4 @@
+#include "analyze_command.hpp"
 #include "fragment_command.hpp"
 #include "shardrecover/binary_file.hpp"
 
@@ -16,15 +17,16 @@ void print_help()
     std::cout << "Usage:\n"
                  "  shardrecover [--help] [--version]\n"
                  "  shardrecover inspect <file>\n"
+                 "  shardrecover analyze <fragment-directory> [--min-overlap <bytes>]\n"
                  "  shardrecover fragment <input> --size <bytes> [--overlap <bytes>]\n"
                  "      [--shuffle] [--opaque-names] [--seed <integer>] --output <directory>\n"
                  "\n"
                  "Commands:\n"
+                 "  analyze      Find directional byte overlaps between fragment files\n"
                  "  inspect      Show file size and a hexadecimal byte preview\n"
                  "  fragment     Split a file into fixed-size binary fragments\n"
                  "\n"
                  "Planned commands:\n"
-                 "  analyze\n"
                  "  reconstruct\n";
 }
 
@@ -96,6 +98,17 @@ int main(int argc, char* argv[])
                       << "Usage: shardrecover fragment <input> --size <bytes> "
                          "[--overlap <bytes>] [--shuffle] [--opaque-names] "
                          "[--seed <integer>] --output <directory>\n";
+            return 1;
+        }
+    }
+
+    if (argument == "analyze") {
+        try {
+            return shardrecover::cli::run_analyze_command(argc - 2, argv + 2);
+        } catch (const std::exception& error) {
+            std::cerr << "Error: " << error.what() << '\n'
+                      << "Usage: shardrecover analyze <fragment-directory> "
+                         "[--min-overlap <bytes>]\n";
             return 1;
         }
     }

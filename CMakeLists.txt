@@ -17,6 +17,7 @@ add_library(shardrecover_core
 target_include_directories(shardrecover_core PUBLIC include)
 
 add_executable(shardrecover
+    cli/analyze_command.cpp
     cli/fragment_command.cpp
     cli/main.cpp
 )
