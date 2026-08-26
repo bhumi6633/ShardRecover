@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 
 namespace shardrecover {
 namespace {
@@ -72,6 +73,20 @@ std::size_t select_start_node(const FragmentGraph& graph)
     return selected;
 }
 
+std::vector<std::size_t> select_beam_start_nodes(const FragmentGraph& graph)
+{
+    std::vector<std::size_t> starts;
+    for (std::size_t node_id = 0; node_id < graph.node_count(); ++node_id) {
+        if (graph.incoming_edges(node_id).empty()) {
+            starts.push_back(node_id);
+        }
+    }
+    if (starts.empty() && graph.node_count() != 0) {
+        starts.push_back(select_start_node(graph));
+    }
+    return starts;
+}
+
 void validate_inputs(const FragmentGraph& graph, std::span<const BinaryFile> fragments)
 {
     if (graph.node_count() != fragments.size()) {
@@ -86,6 +101,88 @@ void validate_inputs(const FragmentGraph& graph, std::span<const BinaryFile> fra
     }
 }
 
+ReconstructionResult materialize_result(std::vector<ReconstructionStep> steps,
+                                        std::span<const BinaryFile> fragments,
+                                        bool complete)
+{
+    ReconstructionResult result;
+    result.steps = std::move(steps);
+    result.complete = complete;
+    if (result.steps.empty()) {
+        return result;
+    }
+
+    const auto first = fragments[result.steps.front().node_id].bytes();
+    result.bytes.assign(first.begin(), first.end());
+    for (std::size_t index = 1; index < result.steps.size(); ++index) {
+        const auto& step = result.steps[index];
+        const auto fragment = fragments[step.node_id].bytes();
+        if (step.overlap_from_previous > fragment.size()) {
+            throw std::logic_error("Graph overlap exceeds destination fragment size");
+        }
+
+        const auto extension = fragment.subspan(step.overlap_from_previous);
+        result.bytes.insert(result.bytes.end(), extension.begin(), extension.end());
+        result.total_overlap_bytes += step.overlap_from_previous;
+    }
+    return result;
+}
+
+struct BeamState {
+    std::vector<ReconstructionStep> steps;
+    std::vector<bool> used;
+    std::size_t total_overlap = 0;
+};
+
+bool state_path_less(const FragmentGraph& graph, const BeamState& left, const BeamState& right)
+{
+    return std::lexicographical_compare(
+        left.steps.begin(), left.steps.end(), right.steps.begin(), right.steps.end(),
+        [&](const auto& left_step, const auto& right_step) {
+            if (left_step.node_id == right_step.node_id) {
+                return false;
+            }
+            return path_less(graph, left_step.node_id, right_step.node_id);
+        });
+}
+
+bool state_better(const FragmentGraph& graph,
+                  const BeamState& left,
+                  const BeamState& right,
+                  std::size_t node_count)
+{
+    const bool left_complete = left.steps.size() == node_count;
+    const bool right_complete = right.steps.size() == node_count;
+    if (left_complete != right_complete) {
+        return left_complete;
+    }
+    if (left.steps.size() != right.steps.size()) {
+        return left.steps.size() > right.steps.size();
+    }
+    if (left.total_overlap != right.total_overlap) {
+        return left.total_overlap > right.total_overlap;
+    }
+    return state_path_less(graph, left, right);
+}
+
+std::size_t recovered_size(const BeamState& state, std::span<const BinaryFile> fragments)
+{
+    if (state.steps.empty()) {
+        return 0;
+    }
+
+    std::size_t size = fragments[state.steps.front().node_id].size();
+    for (std::size_t index = 1; index < state.steps.size(); ++index) {
+        const auto& step = state.steps[index];
+        const auto fragment_size = fragments[step.node_id].size();
+        if (step.overlap_from_previous > fragment_size) {
+            throw std::logic_error("Graph overlap exceeds destination fragment size");
+        }
+        size += fragment_size - step.overlap_from_previous;
+    }
+    return size;
+}
+
 }  // namespace
 
 ReconstructionResult GreedyReconstructor::reconstruct(const FragmentGraph& graph,
@@ -93,8 +190,8 @@ ReconstructionResult GreedyReconstructor::reconstruct(const FragmentGraph& graph
 {
     validate_inputs(graph, fragments);
 
-    ReconstructionResult result;
     if (fragments.empty()) {
+        ReconstructionResult result;
         result.complete = true;
         return result;
     }
@@ -102,11 +199,10 @@ ReconstructionResult GreedyReconstructor::reconstruct(const FragmentGraph& graph
     std::vector<bool> used(fragments.size(), false);
     auto current = select_start_node(graph);
     used[current] = true;
-    result.steps.push_back(ReconstructionStep{current, 0});
-    const auto first_bytes = fragments[current].bytes();
-    result.bytes.assign(first_bytes.begin(), first_bytes.end());
+    std::vector<ReconstructionStep> steps;
+    steps.push_back(ReconstructionStep{current, 0});
 
-    while (result.steps.size() < fragments.size()) {
+    while (steps.size() < fragments.size()) {
         const auto outgoing = graph.outgoing_edges(current);
         const auto next = std::find_if(outgoing.begin(), outgoing.end(), [&](const auto& edge) {
             return !used[edge.to];
@@ -115,20 +211,124 @@ ReconstructionResult GreedyReconstructor::reconstruct(const FragmentGraph& graph
             break;
         }
 
-        const auto next_bytes = fragments[next->to].bytes();
-        if (next->overlap > next_bytes.size()) {
-            throw std::logic_error("Graph overlap exceeds destination fragment size");
-        }
-
-        const auto extension = next_bytes.subspan(next->overlap);
-        result.bytes.insert(result.bytes.end(), extension.begin(), extension.end());
-        result.total_overlap_bytes += next->overlap;
         current = next->to;
         used[current] = true;
-        result.steps.push_back(ReconstructionStep{current, next->overlap});
+        steps.push_back(ReconstructionStep{current, next->overlap});
     }
 
-    result.complete = result.steps.size() == fragments.size();
+    const bool complete = steps.size() == fragments.size();
+    return materialize_result(std::move(steps), fragments, complete);
+}
+
+BeamReconstructionResult BeamReconstructor::reconstruct(const FragmentGraph& graph,
+                                                         std::span<const BinaryFile> fragments,
+                                                         std::size_t beam_width)
+{
+    validate_inputs(graph, fragments);
+    if (beam_width == 0) {
+        throw std::invalid_argument("Beam width must be greater than zero");
+    }
+
+    BeamReconstructionResult result;
+    if (fragments.empty()) {
+        result.selected.complete = true;
+        result.candidates.push_back(ReconstructionCandidateResult{{}, 0, 0, true});
+        return result;
+    }
+
+    std::vector<BeamState> beam;
+    for (const auto node_id : select_beam_start_nodes(graph)) {
+        BeamState state;
+        state.steps.push_back(ReconstructionStep{node_id, 0});
+        state.used.assign(fragments.size(), false);
+        state.used[node_id] = true;
+        beam.push_back(std::move(state));
+        ++result.statistics.states_generated;
+    }
+
+    std::sort(beam.begin(), beam.end(), [&](const auto& left, const auto& right) {
+        return state_better(graph, left, right, fragments.size());
+    });
+    if (beam.size() > beam_width) {
+        beam.resize(beam_width);
+    }
+    result.statistics.maximum_beam_size = beam.size();
+
+    std::vector<BeamState> finals;
+    while (!beam.empty()) {
+        std::vector<BeamState> expanded;
+        bool found_complete = false;
+
+        for (const auto& state : beam) {
+            ++result.statistics.states_expanded;
+            bool generated_child = false;
+            const auto current = state.steps.back().node_id;
+            for (const auto& edge : graph.outgoing_edges(current)) {
+                if (state.used[edge.to]) {
+                    continue;
+                }
+
+                generated_child = true;
+                BeamState child = state;
+                child.steps.push_back(ReconstructionStep{edge.to, edge.overlap});
+                child.used[edge.to] = true;
+                child.total_overlap += edge.overlap;
+                ++result.statistics.states_generated;
+
+                if (child.steps.size() == fragments.size()) {
+                    ++result.statistics.complete_candidates_found;
+                    found_complete = true;
+                    finals.push_back(std::move(child));
+                } else {
+                    expanded.push_back(std::move(child));
+                }
+            }
+
+            if (!generated_child) {
+                if (state.steps.size() == fragments.size()) {
+                    ++result.statistics.complete_candidates_found;
+                    found_complete = true;
+                }
+                finals.push_back(state);
+            }
+        }
+
+        if (found_complete) {
+            break;
+        }
+
+        std::sort(expanded.begin(), expanded.end(), [&](const auto& left, const auto& right) {
+            return state_better(graph, left, right, fragments.size());
+        });
+        if (expanded.size() > beam_width) {
+            expanded.resize(beam_width);
+        }
+        beam = std::move(expanded);
+        result.statistics.maximum_beam_size = std::max(result.statistics.maximum_beam_size,
+                                                       beam.size());
+    }
+
+    std::sort(finals.begin(), finals.end(), [&](const auto& left, const auto& right) {
+        return state_better(graph, left, right, fragments.size());
+    });
+    if (finals.empty()) {
+        throw std::logic_error("Beam search produced no reconstruction candidates");
+    }
+
+    result.candidates.reserve(finals.size());
+    for (const auto& candidate : finals) {
+        result.candidates.push_back(ReconstructionCandidateResult{
+            candidate.steps,
+            candidate.total_overlap,
+            recovered_size(candidate, fragments),
+            candidate.steps.size() == fragments.size(),
+        });
+    }
+
+    const auto& selected = finals.front();
+    result.selected = materialize_result(selected.steps,
+                                         fragments,
+                                         selected.steps.size() == fragments.size());
     return result;
 }
 
