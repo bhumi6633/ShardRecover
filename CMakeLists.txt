@@ -14,7 +14,10 @@ add_library(shardrecover_core
 )
 target_include_directories(shardrecover_core PUBLIC include)
 
-add_executable(shardrecover cli/main.cpp)
+add_executable(shardrecover
+    cli/fragment_command.cpp
+    cli/main.cpp
+)
 target_link_libraries(shardrecover PRIVATE shardrecover_core)
 
 if(BUILD_TESTING)

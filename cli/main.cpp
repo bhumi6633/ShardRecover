@@ -1,3 +1,4 @@
+#include "fragment_command.hpp"
 #include "shardrecover/binary_file.hpp"
 
 #include <algorithm>
@@ -15,12 +16,13 @@ void print_help()
     std::cout << "Usage:\n"
                  "  shardrecover [--help] [--version]\n"
                  "  shardrecover inspect <file>\n"
+                 "  shardrecover fragment <input> --size <bytes> --output <directory>\n"
                  "\n"
                  "Commands:\n"
                  "  inspect      Show file size and a hexadecimal byte preview\n"
+                 "  fragment     Split a file into fixed-size binary fragments\n"
                  "\n"
                  "Planned commands:\n"
-                 "  fragment\n"
                  "  analyze\n"
                  "  reconstruct\n";
 }
@@ -81,6 +83,16 @@ int main(int argc, char* argv[])
             return 0;
         } catch (const std::exception& error) {
             std::cerr << "Error: " << error.what() << '\n';
+            return 1;
+        }
+    }
+
+    if (argument == "fragment") {
+        try {
+            return shardrecover::cli::run_fragment_command(argc - 2, argv + 2);
+        } catch (const std::exception& error) {
+            std::cerr << "Error: " << error.what() << '\n'
+                      << "Usage: shardrecover fragment <input> --size <bytes> --output <directory>\n";
             return 1;
         }
     }
