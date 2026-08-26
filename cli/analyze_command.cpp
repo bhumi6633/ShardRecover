@@ -1,6 +1,6 @@
 #include "analyze_command.hpp"
+#include "fragment_directory.hpp"
 
-#include "shardrecover/binary_file.hpp"
 #include "shardrecover/fragment_graph.hpp"
 
 #include <algorithm>
@@ -14,7 +14,6 @@
 #include <string>
 #include <string_view>
 #include <system_error>
-#include <vector>
 
 namespace shardrecover::cli {
 namespace {
@@ -43,50 +42,6 @@ std::size_t parse_top_count(std::string_view value)
         throw std::runtime_error("Top count must be greater than zero");
     }
     return count;
-}
-
-std::vector<std::filesystem::path> discover_fragments(const std::filesystem::path& directory)
-{
-    std::error_code error;
-    const auto status = std::filesystem::status(directory, error);
-    if (error) {
-        throw std::runtime_error("Failed to inspect fragment directory '" + directory.string()
-                                 + "': " + error.message());
-    }
-    if (!std::filesystem::exists(status)) {
-        throw std::runtime_error("Fragment directory does not exist: '" + directory.string() + "'");
-    }
-    if (!std::filesystem::is_directory(status)) {
-        throw std::runtime_error("Fragment path is not a directory: '" + directory.string() + "'");
-    }
-
-    std::vector<std::filesystem::path> paths;
-    std::filesystem::directory_iterator iterator(directory, error);
-    const std::filesystem::directory_iterator end;
-    if (error) {
-        throw std::runtime_error("Failed to read fragment directory '" + directory.string()
-                                 + "': " + error.message());
-    }
-
-    while (iterator != end) {
-        if (iterator->is_regular_file(error)) {
-            paths.push_back(iterator->path());
-        } else if (error) {
-            throw std::runtime_error("Failed to inspect directory entry '"
-                                     + iterator->path().string() + "': " + error.message());
-        }
-
-        iterator.increment(error);
-        if (error) {
-            throw std::runtime_error("Failed while reading fragment directory '"
-                                     + directory.string() + "': " + error.message());
-        }
-    }
-
-    std::sort(paths.begin(), paths.end(), [](const auto& left, const auto& right) {
-        return left.filename().string() < right.filename().string();
-    });
-    return paths;
 }
 
 }  // namespace
@@ -128,12 +83,7 @@ int run_analyze_command(int argc, char* argv[])
         }
     }
 
-    const auto paths = discover_fragments(directory);
-    std::vector<BinaryFile> fragments;
-    fragments.reserve(paths.size());
-    for (const auto& path : paths) {
-        fragments.push_back(BinaryFile::load(path));
-    }
+    const auto fragments = load_fragment_directory(directory);
 
     const auto start = std::chrono::steady_clock::now();
     const auto graph = FragmentGraph::build(std::span<const BinaryFile>{fragments}, minimum_overlap);

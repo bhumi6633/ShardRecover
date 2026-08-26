@@ -20,8 +20,10 @@ target_include_directories(shardrecover_core PUBLIC include)
 
 add_executable(shardrecover
     cli/analyze_command.cpp
+    cli/fragment_directory.cpp
     cli/fragment_command.cpp
     cli/main.cpp
+    cli/reconstruct_command.cpp
 )
 target_link_libraries(shardrecover PRIVATE shardrecover_core)
 
