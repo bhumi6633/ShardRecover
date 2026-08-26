@@ -19,15 +19,12 @@
 namespace shardrecover::cli {
 namespace {
 
-std::size_t parse_fragment_size(std::string_view value)
+std::size_t parse_byte_count(std::string_view value, std::string_view name)
 {
     std::size_t size = 0;
     const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), size);
     if (value.empty() || error != std::errc{} || end != value.data() + value.size()) {
-        throw std::runtime_error("Invalid fragment size: '" + std::string(value) + "'");
-    }
-    if (size == 0) {
-        throw std::runtime_error("Fragment size must be greater than zero");
+        throw std::runtime_error("Invalid " + std::string(name) + ": '" + std::string(value) + "'");
     }
     return size;
 }
@@ -68,7 +65,9 @@ int run_fragment_command(int argc, char* argv[])
     const std::filesystem::path input_path{argv[0]};
     std::filesystem::path output_path;
     std::size_t fragment_size = 0;
+    std::size_t overlap = 0;
     bool has_size = false;
+    bool has_overlap = false;
     bool has_output = false;
 
     for (int index = 1; index < argc; ++index) {
@@ -80,8 +79,20 @@ int run_fragment_command(int argc, char* argv[])
             if (++index >= argc) {
                 throw std::runtime_error("--size requires a value");
             }
-            fragment_size = parse_fragment_size(argv[index]);
+            fragment_size = parse_byte_count(argv[index], "fragment size");
+            if (fragment_size == 0) {
+                throw std::runtime_error("Fragment size must be greater than zero");
+            }
             has_size = true;
+        } else if (option == "--overlap") {
+            if (has_overlap) {
+                throw std::runtime_error("--overlap may only be specified once");
+            }
+            if (++index >= argc) {
+                throw std::runtime_error("--overlap requires a value");
+            }
+            overlap = parse_byte_count(argv[index], "overlap");
+            has_overlap = true;
         } else if (option == "--output") {
             if (has_output) {
                 throw std::runtime_error("--output may only be specified once");
@@ -104,7 +115,7 @@ int run_fragment_command(int argc, char* argv[])
     }
 
     const auto input = BinaryFile::load(input_path);
-    const auto fragments = FragmentGenerator::generate(input.bytes(), fragment_size);
+    const auto fragments = FragmentGenerator::generate(input.bytes(), fragment_size, overlap);
 
     std::error_code error;
     std::filesystem::create_directories(output_path, error);
@@ -125,6 +136,8 @@ int run_fragment_command(int argc, char* argv[])
     std::cout << "Input: " << input_path.string() << '\n'
               << "Input size: " << input.size() << " bytes\n"
               << "Fragment size: " << fragment_size << " bytes\n"
+              << "Overlap: " << overlap << " bytes\n"
+              << "Stride: " << fragment_size - overlap << " bytes\n"
               << "Fragments written: " << fragments.size() << '\n'
               << "Output: " << output_path.string() << '\n';
     return 0;
