@@ -15,6 +15,9 @@ bool edge_less(const FragmentEdge& left,
     if (left.overlap != right.overlap) {
         return left.overlap > right.overlap;
     }
+    if (left.mismatches != right.mismatches) {
+        return left.mismatches < right.mismatches;
+    }
 
     const auto& left_source = nodes[left.from].path;
     const auto& right_source = nodes[right.from].path;
@@ -34,7 +37,8 @@ bool edge_less(const FragmentEdge& left,
 }  // namespace
 
 FragmentGraph FragmentGraph::build(std::span<const BinaryFile> fragments,
-                                   std::size_t minimum_overlap)
+                                   std::size_t minimum_overlap,
+                                   std::size_t max_mismatches)
 {
     if (minimum_overlap == 0) {
         throw std::invalid_argument("Minimum overlap must be greater than zero");
@@ -52,10 +56,18 @@ FragmentGraph FragmentGraph::build(std::span<const BinaryFile> fragments,
                 continue;
             }
 
-            const auto result = find_suffix_prefix_overlap(fragments[from].bytes(),
-                                                           fragments[to].bytes());
+            const auto result = find_tolerant_suffix_prefix_overlap(fragments[from].bytes(),
+                                                                    fragments[to].bytes(),
+                                                                    minimum_overlap,
+                                                                    max_mismatches);
             if (result.length >= minimum_overlap) {
-                graph.edges_.push_back(FragmentEdge{from, to, result.length});
+                graph.edges_.push_back(FragmentEdge{from,
+                                                    to,
+                                                    result.length,
+                                                    result.matches,
+                                                    result.mismatches,
+                                                    result.exact,
+                                                    result.mismatch_details});
             }
         }
     }

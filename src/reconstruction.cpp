@@ -124,6 +124,10 @@ ReconstructionResult materialize_result(std::vector<ReconstructionStep> steps,
         const auto extension = fragment.subspan(step.overlap_from_previous);
         result.bytes.insert(result.bytes.end(), extension.begin(), extension.end());
         result.total_overlap_bytes += step.overlap_from_previous;
+        result.overlap_mismatches += step.mismatches;
+        if (!step.exact) {
+            ++result.approximate_joins;
+        }
     }
     return result;
 }
@@ -132,6 +136,7 @@ struct BeamState {
     std::vector<ReconstructionStep> steps;
     std::vector<bool> used;
     std::size_t total_overlap = 0;
+    std::size_t total_mismatches = 0;
 };
 
 bool state_path_less(const FragmentGraph& graph, const BeamState& left, const BeamState& right)
@@ -161,6 +166,9 @@ bool state_better(const FragmentGraph& graph,
     }
     if (left.total_overlap != right.total_overlap) {
         return left.total_overlap > right.total_overlap;
+    }
+    if (left.total_mismatches != right.total_mismatches) {
+        return left.total_mismatches < right.total_mismatches;
     }
     return state_path_less(graph, left, right);
 }
@@ -203,8 +211,11 @@ bool evidence_better(const FragmentGraph& graph,
         return left.total_overlap_bytes > right.total_overlap_bytes;
     }
 
-    const BeamState left_state{left.steps, {}, left.total_overlap_bytes};
-    const BeamState right_state{right.steps, {}, right.total_overlap_bytes};
+    if (left.overlap_mismatches != right.overlap_mismatches) {
+        return left.overlap_mismatches < right.overlap_mismatches;
+    }
+    const BeamState left_state{left.steps, {}, left.total_overlap_bytes, left.overlap_mismatches};
+    const BeamState right_state{right.steps, {}, right.total_overlap_bytes, right.overlap_mismatches};
     return state_path_less(graph, left_state, right_state);
 }
 
@@ -225,7 +236,7 @@ ReconstructionResult GreedyReconstructor::reconstruct(const FragmentGraph& graph
     auto current = select_start_node(graph);
     used[current] = true;
     std::vector<ReconstructionStep> steps;
-    steps.push_back(ReconstructionStep{current, 0});
+    steps.push_back(ReconstructionStep{current, 0, 0, 0, true, {}});
 
     while (steps.size() < fragments.size()) {
         const auto outgoing = graph.outgoing_edges(current);
@@ -238,7 +249,12 @@ ReconstructionResult GreedyReconstructor::reconstruct(const FragmentGraph& graph
 
         current = next->to;
         used[current] = true;
-        steps.push_back(ReconstructionStep{current, next->overlap});
+        steps.push_back(ReconstructionStep{current,
+                                           next->overlap,
+                                           next->matches,
+                                           next->mismatches,
+                                           next->exact,
+                                           next->mismatch_details});
     }
 
     const bool complete = steps.size() == fragments.size();
@@ -271,7 +287,7 @@ BeamReconstructionResult BeamReconstructor::reconstruct(const FragmentGraph& gra
     std::vector<BeamState> beam;
     for (const auto node_id : select_beam_start_nodes(graph)) {
         BeamState state;
-        state.steps.push_back(ReconstructionStep{node_id, 0});
+        state.steps.push_back(ReconstructionStep{node_id, 0, 0, 0, true, {}});
         state.used.assign(fragments.size(), false);
         state.used[node_id] = true;
         beam.push_back(std::move(state));
@@ -302,9 +318,15 @@ BeamReconstructionResult BeamReconstructor::reconstruct(const FragmentGraph& gra
 
                 generated_child = true;
                 BeamState child = state;
-                child.steps.push_back(ReconstructionStep{edge.to, edge.overlap});
+                child.steps.push_back(ReconstructionStep{edge.to,
+                                                         edge.overlap,
+                                                         edge.matches,
+                                                         edge.mismatches,
+                                                         edge.exact,
+                                                         edge.mismatch_details});
                 child.used[edge.to] = true;
                 child.total_overlap += edge.overlap;
+                child.total_mismatches += edge.mismatches;
                 ++result.statistics.states_generated;
 
                 if (child.steps.size() == fragments.size()) {
@@ -349,6 +371,11 @@ BeamReconstructionResult BeamReconstructor::reconstruct(const FragmentGraph& gra
         ReconstructionCandidateResult summary;
         summary.steps = candidate.steps;
         summary.total_overlap_bytes = candidate.total_overlap;
+        summary.overlap_mismatches = candidate.total_mismatches;
+        summary.approximate_joins = static_cast<std::size_t>(std::count_if(
+            summary.steps.begin(), summary.steps.end(), [](const auto& step) {
+                return !step.exact;
+            }));
         summary.recovered_size = recovered_size(candidate, fragments);
         summary.complete = candidate.steps.size() == fragments.size();
         summary.evidence.complete = summary.complete;

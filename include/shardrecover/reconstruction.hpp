@@ -15,12 +15,18 @@ namespace shardrecover {
 struct ReconstructionStep {
     std::size_t node_id;
     std::size_t overlap_from_previous;
+    std::size_t matches = 0;
+    std::size_t mismatches = 0;
+    bool exact = true;
+    std::vector<OverlapMismatch> mismatch_details;
 };
 
 struct ReconstructionResult {
     std::vector<ReconstructionStep> steps;
     std::vector<std::byte> bytes;
     std::size_t total_overlap_bytes = 0;
+    std::size_t approximate_joins = 0;
+    std::size_t overlap_mismatches = 0;
     bool complete = false;
 };
 
@@ -52,6 +58,8 @@ struct ReconstructionEvidence {
 struct ReconstructionCandidateResult {
     std::vector<ReconstructionStep> steps;
     std::size_t total_overlap_bytes = 0;
+    std::size_t approximate_joins = 0;
+    std::size_t overlap_mismatches = 0;
     std::size_t recovered_size = 0;
     bool complete = false;
     ReconstructionEvidence evidence;

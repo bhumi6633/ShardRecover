@@ -58,6 +58,16 @@ std::size_t parse_positive_count(std::string_view value, std::string_view name)
     return count;
 }
 
+std::size_t parse_mismatch_count(std::string_view value)
+{
+    std::size_t count = 0;
+    const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), count);
+    if (value.empty() || error != std::errc{} || end != value.data() + value.size()) {
+        throw std::runtime_error("Invalid maximum mismatch count: '" + std::string(value) + "'");
+    }
+    return count;
+}
+
 void write_reconstruction(const std::filesystem::path& path,
                           std::span<const std::byte> bytes)
 {
@@ -88,6 +98,7 @@ int run_reconstruct_command(int argc, char* argv[])
     std::size_t minimum_overlap = 1;
     std::size_t beam_width = 8;
     std::size_t candidate_count = 3;
+    std::size_t max_mismatches = 0;
     ReconstructionStrategy strategy = ReconstructionStrategy::greedy;
     ReconstructionFormat format = ReconstructionFormat::none;
     bool has_minimum = false;
@@ -96,6 +107,7 @@ int run_reconstruct_command(int argc, char* argv[])
     bool has_beam_width = false;
     bool has_candidate_count = false;
     bool has_format = false;
+    bool has_max_mismatches = false;
 
     for (int index = 1; index < argc; ++index) {
         const std::string_view option{argv[index]};
@@ -108,6 +120,15 @@ int run_reconstruct_command(int argc, char* argv[])
             }
             minimum_overlap = parse_minimum_overlap(argv[index]);
             has_minimum = true;
+        } else if (option == "--max-mismatches") {
+            if (has_max_mismatches) {
+                throw std::runtime_error("--max-mismatches may only be specified once");
+            }
+            if (++index >= argc || std::string_view(argv[index]).starts_with("--")) {
+                throw std::runtime_error("--max-mismatches requires a value");
+            }
+            max_mismatches = parse_mismatch_count(argv[index]);
+            has_max_mismatches = true;
         } else if (option == "--strategy") {
             if (has_strategy) {
                 throw std::runtime_error("--strategy may only be specified once");
@@ -191,7 +212,7 @@ int run_reconstruct_command(int argc, char* argv[])
     }
 
     const auto fragment_span = std::span<const BinaryFile>{fragments};
-    const auto graph = FragmentGraph::build(fragment_span, minimum_overlap);
+    const auto graph = FragmentGraph::build(fragment_span, minimum_overlap, max_mismatches);
     const auto search_start = std::chrono::steady_clock::now();
     ReconstructionResult result;
     std::optional<BeamReconstructionResult> beam_result;
@@ -218,7 +239,8 @@ int run_reconstruct_command(int argc, char* argv[])
               << (format == ReconstructionFormat::png ? "png" : "none") << '\n';
     std::cout << "Fragments loaded: " << fragments.size() << '\n'
               << "Graph edges: " << graph.edge_count() << '\n'
-              << "Minimum overlap: " << minimum_overlap << " bytes\n";
+              << "Minimum overlap: " << minimum_overlap << " bytes\n"
+              << "Maximum mismatches: " << max_mismatches << '\n';
 
     if (beam_result.has_value()) {
         const auto displayed = std::min(candidate_count, beam_result->candidates.size());
@@ -228,6 +250,8 @@ int run_reconstruct_command(int argc, char* argv[])
                       << "Fragments used: " << candidate.steps.size() << " / "
                       << fragments.size() << '\n'
                       << "Total overlap: " << candidate.total_overlap_bytes << " bytes\n"
+                      << "Approximate joins: " << candidate.approximate_joins << '\n'
+                      << "Overlap mismatches: " << candidate.overlap_mismatches << '\n'
                       << "Recovered bytes: " << candidate.recovered_size << '\n'
                       << "Status: " << (candidate.complete ? "complete" : "incomplete") << '\n';
             if (candidate.evidence.format.has_value()) {
@@ -253,13 +277,17 @@ int run_reconstruct_command(int argc, char* argv[])
     for (std::size_t index = 1; index < result.steps.size(); ++index) {
         const auto& step = result.steps[index];
         std::cout << "  -> " << graph.nodes()[step.node_id].path.filename().string()
-                  << "    overlap=" << step.overlap_from_previous << '\n';
+                  << "    overlap=" << step.overlap_from_previous
+                  << " mismatches=" << step.mismatches
+                  << " exact=" << (step.exact ? "yes" : "no") << '\n';
     }
 
     const auto unresolved = fragments.size() - result.steps.size();
     std::cout << "\nFragments used: " << result.steps.size() << " / " << fragments.size() << '\n'
               << "Recovered bytes: " << result.bytes.size() << '\n'
               << "Overlap bytes removed: " << result.total_overlap_bytes << '\n'
+              << "Approximate joins used: " << result.approximate_joins << '\n'
+              << "Overlap mismatches observed: " << result.overlap_mismatches << '\n'
               << "Status: " << (result.complete ? "complete" : "incomplete") << '\n';
     if (!result.complete) {
         std::cout << "Unresolved fragments: " << unresolved << '\n'

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "shardrecover/binary_file.hpp"
+#include "shardrecover/overlap.hpp"
 
 #include <cstddef>
 #include <filesystem>
@@ -19,12 +20,17 @@ struct FragmentEdge {
     std::size_t from;
     std::size_t to;
     std::size_t overlap;
+    std::size_t matches;
+    std::size_t mismatches;
+    bool exact;
+    std::vector<OverlapMismatch> mismatch_details;
 };
 
 class FragmentGraph {
 public:
     static FragmentGraph build(std::span<const BinaryFile> fragments,
-                               std::size_t minimum_overlap);
+                               std::size_t minimum_overlap,
+                               std::size_t max_mismatches = 0);
 
     std::span<const FragmentNode> nodes() const noexcept;
     std::span<const FragmentEdge> edges() const noexcept;

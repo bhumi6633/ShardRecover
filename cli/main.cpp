@@ -18,12 +18,14 @@ void print_help()
     std::cout << "Usage:\n"
                  "  shardrecover [--help] [--version]\n"
                  "  shardrecover inspect <file>\n"
-                 "  shardrecover analyze <fragment-directory> [--min-overlap <bytes>] [--top <count>]\n"
+                 "  shardrecover analyze <fragment-directory> [--min-overlap <bytes>]\n"
+                 "      [--max-mismatches <count>] [--top <count>]\n"
                  "  shardrecover fragment <input> --size <bytes> [--overlap <bytes>]\n"
                  "      [--shuffle] [--opaque-names] [--seed <integer>]\n"
                  "      [--duplicates <count>] [--noise <count>] [--drop <count>]\n"
                  "      [--corrupt-bytes <count>] --output <directory>\n"
                  "  shardrecover reconstruct <fragment-directory> [--min-overlap <bytes>]\n"
+                 "      [--max-mismatches <count>]\n"
                  "      [--strategy <greedy|beam>] [--beam-width <count>]\n"
                  "      [--candidates <count>] [--format <none|png>] --output <file>\n"
                  "\n"
@@ -112,7 +114,7 @@ int main(int argc, char* argv[])
         } catch (const std::exception& error) {
             std::cerr << "Error: " << error.what() << '\n'
                       << "Usage: shardrecover analyze <fragment-directory> "
-                         "[--min-overlap <bytes>] [--top <count>]\n";
+                         "[--min-overlap <bytes>] [--max-mismatches <count>] [--top <count>]\n";
             return 1;
         }
     }
@@ -124,6 +126,7 @@ int main(int argc, char* argv[])
             std::cerr << "Error: " << error.what() << '\n'
                       << "Usage: shardrecover reconstruct <fragment-directory> "
                          "[--min-overlap <bytes>] [--strategy <greedy|beam>] "
+                         "[--max-mismatches <count>] "
                          "[--beam-width <count>] [--candidates <count>] "
                          "[--format <none|png>] --output <file>\n";
             return 1;
