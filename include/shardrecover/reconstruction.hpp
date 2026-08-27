@@ -4,7 +4,10 @@
 #include "shardrecover/fragment_graph.hpp"
 
 #include <cstddef>
+#include <cstdint>
+#include <optional>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace shardrecover {
@@ -21,11 +24,37 @@ struct ReconstructionResult {
     bool complete = false;
 };
 
+struct EvidenceFact {
+    std::string name;
+    std::string value;
+};
+
+struct FormatEvidence {
+    std::string format;
+    std::vector<std::int64_t> ranking_keys;
+    std::vector<EvidenceFact> facts;
+};
+
+class CandidateEvaluator {
+public:
+    virtual ~CandidateEvaluator() = default;
+    // Beam search evaluates terminal candidates only; partial-state pruning remains generic.
+    virtual FormatEvidence evaluate(std::span<const std::byte> candidate) const = 0;
+};
+
+struct ReconstructionEvidence {
+    bool complete = false;
+    std::size_t fragments_used = 0;
+    std::size_t total_overlap = 0;
+    std::optional<FormatEvidence> format;
+};
+
 struct ReconstructionCandidateResult {
     std::vector<ReconstructionStep> steps;
     std::size_t total_overlap_bytes = 0;
     std::size_t recovered_size = 0;
     bool complete = false;
+    ReconstructionEvidence evidence;
 };
 
 struct BeamSearchStatistics {
@@ -51,7 +80,8 @@ class BeamReconstructor {
 public:
     static BeamReconstructionResult reconstruct(const FragmentGraph& graph,
                                                 std::span<const BinaryFile> fragments,
-                                                std::size_t beam_width);
+                                                std::size_t beam_width,
+                                                const CandidateEvaluator* evaluator = nullptr);
 };
 
 }  // namespace shardrecover

@@ -183,6 +183,31 @@ std::size_t recovered_size(const BeamState& state, std::span<const BinaryFile> f
     return size;
 }
 
+bool evidence_better(const FragmentGraph& graph,
+                     const ReconstructionCandidateResult& left,
+                     const ReconstructionCandidateResult& right)
+{
+    if (left.complete != right.complete) {
+        return left.complete;
+    }
+    if (left.evidence.format.has_value() && right.evidence.format.has_value()
+        && left.evidence.format->ranking_keys != right.evidence.format->ranking_keys) {
+        return std::lexicographical_compare(
+            right.evidence.format->ranking_keys.begin(), right.evidence.format->ranking_keys.end(),
+            left.evidence.format->ranking_keys.begin(), left.evidence.format->ranking_keys.end());
+    }
+    if (left.steps.size() != right.steps.size()) {
+        return left.steps.size() > right.steps.size();
+    }
+    if (left.total_overlap_bytes != right.total_overlap_bytes) {
+        return left.total_overlap_bytes > right.total_overlap_bytes;
+    }
+
+    const BeamState left_state{left.steps, {}, left.total_overlap_bytes};
+    const BeamState right_state{right.steps, {}, right.total_overlap_bytes};
+    return state_path_less(graph, left_state, right_state);
+}
+
 }  // namespace
 
 ReconstructionResult GreedyReconstructor::reconstruct(const FragmentGraph& graph,
@@ -222,7 +247,8 @@ ReconstructionResult GreedyReconstructor::reconstruct(const FragmentGraph& graph
 
 BeamReconstructionResult BeamReconstructor::reconstruct(const FragmentGraph& graph,
                                                          std::span<const BinaryFile> fragments,
-                                                         std::size_t beam_width)
+                                                         std::size_t beam_width,
+                                                         const CandidateEvaluator* evaluator)
 {
     validate_inputs(graph, fragments);
     if (beam_width == 0) {
@@ -232,7 +258,13 @@ BeamReconstructionResult BeamReconstructor::reconstruct(const FragmentGraph& gra
     BeamReconstructionResult result;
     if (fragments.empty()) {
         result.selected.complete = true;
-        result.candidates.push_back(ReconstructionCandidateResult{{}, 0, 0, true});
+        ReconstructionCandidateResult candidate;
+        candidate.complete = true;
+        candidate.evidence.complete = true;
+        if (evaluator != nullptr) {
+            candidate.evidence.format = evaluator->evaluate({});
+        }
+        result.candidates.push_back(std::move(candidate));
         return result;
     }
 
@@ -308,27 +340,36 @@ BeamReconstructionResult BeamReconstructor::reconstruct(const FragmentGraph& gra
                                                        beam.size());
     }
 
-    std::sort(finals.begin(), finals.end(), [&](const auto& left, const auto& right) {
-        return state_better(graph, left, right, fragments.size());
-    });
     if (finals.empty()) {
         throw std::logic_error("Beam search produced no reconstruction candidates");
     }
 
     result.candidates.reserve(finals.size());
     for (const auto& candidate : finals) {
-        result.candidates.push_back(ReconstructionCandidateResult{
-            candidate.steps,
-            candidate.total_overlap,
-            recovered_size(candidate, fragments),
-            candidate.steps.size() == fragments.size(),
-        });
+        ReconstructionCandidateResult summary;
+        summary.steps = candidate.steps;
+        summary.total_overlap_bytes = candidate.total_overlap;
+        summary.recovered_size = recovered_size(candidate, fragments);
+        summary.complete = candidate.steps.size() == fragments.size();
+        summary.evidence.complete = summary.complete;
+        summary.evidence.fragments_used = summary.steps.size();
+        summary.evidence.total_overlap = summary.total_overlap_bytes;
+        if (evaluator != nullptr) {
+            const auto materialized = materialize_result(candidate.steps, fragments, summary.complete);
+            summary.evidence.format = evaluator->evaluate(materialized.bytes);
+        }
+        result.candidates.push_back(std::move(summary));
     }
 
-    const auto& selected = finals.front();
+    std::sort(result.candidates.begin(), result.candidates.end(), [&](const auto& left,
+                                                                      const auto& right) {
+        return evidence_better(graph, left, right);
+    });
+
+    const auto& selected = result.candidates.front();
     result.selected = materialize_result(selected.steps,
                                          fragments,
-                                         selected.steps.size() == fragments.size());
+                                         selected.complete);
     return result;
 }
 
