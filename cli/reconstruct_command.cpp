@@ -2,6 +2,7 @@
 
 #include "fragment_directory.hpp"
 #include "shardrecover/fragment_graph.hpp"
+#include "shardrecover/png/reconstruction_evaluator.hpp"
 #include "shardrecover/reconstruction.hpp"
 
 #include <algorithm>
@@ -24,6 +25,11 @@ namespace {
 enum class ReconstructionStrategy {
     greedy,
     beam,
+};
+
+enum class ReconstructionFormat {
+    none,
+    png,
 };
 
 std::size_t parse_minimum_overlap(std::string_view value)
@@ -83,11 +89,13 @@ int run_reconstruct_command(int argc, char* argv[])
     std::size_t beam_width = 8;
     std::size_t candidate_count = 3;
     ReconstructionStrategy strategy = ReconstructionStrategy::greedy;
+    ReconstructionFormat format = ReconstructionFormat::none;
     bool has_minimum = false;
     bool has_output = false;
     bool has_strategy = false;
     bool has_beam_width = false;
     bool has_candidate_count = false;
+    bool has_format = false;
 
     for (int index = 1; index < argc; ++index) {
         const std::string_view option{argv[index]};
@@ -135,6 +143,23 @@ int run_reconstruct_command(int argc, char* argv[])
             }
             candidate_count = parse_positive_count(argv[index], "Candidate count");
             has_candidate_count = true;
+        } else if (option == "--format") {
+            if (has_format) {
+                throw std::runtime_error("--format may only be specified once");
+            }
+            if (++index >= argc || std::string_view(argv[index]).starts_with("--")) {
+                throw std::runtime_error("--format requires none or png");
+            }
+            const std::string_view value{argv[index]};
+            if (value == "none") {
+                format = ReconstructionFormat::none;
+            } else if (value == "png") {
+                format = ReconstructionFormat::png;
+            } else {
+                throw std::runtime_error("Invalid reconstruction format: '"
+                                         + std::string(value) + "'");
+            }
+            has_format = true;
         } else if (option == "--output") {
             if (has_output) {
                 throw std::runtime_error("--output may only be specified once");
@@ -155,6 +180,9 @@ int run_reconstruct_command(int argc, char* argv[])
     if (strategy == ReconstructionStrategy::greedy && (has_beam_width || has_candidate_count)) {
         throw std::runtime_error("--beam-width and --candidates require --strategy beam");
     }
+    if (strategy == ReconstructionStrategy::greedy && format != ReconstructionFormat::none) {
+        throw std::runtime_error("--format png requires --strategy beam");
+    }
 
     const auto fragments = load_fragment_directory(directory);
     if (fragments.empty()) {
@@ -167,8 +195,12 @@ int run_reconstruct_command(int argc, char* argv[])
     const auto search_start = std::chrono::steady_clock::now();
     ReconstructionResult result;
     std::optional<BeamReconstructionResult> beam_result;
+    png::ReconstructionEvaluator png_evaluator;
     if (strategy == ReconstructionStrategy::beam) {
-        beam_result = BeamReconstructor::reconstruct(graph, fragment_span, beam_width);
+        const CandidateEvaluator* evaluator = format == ReconstructionFormat::png
+                                                  ? &png_evaluator
+                                                  : nullptr;
+        beam_result = BeamReconstructor::reconstruct(graph, fragment_span, beam_width, evaluator);
         result = beam_result->selected;
     } else {
         result = GreedyReconstructor::reconstruct(graph, fragment_span);
@@ -182,6 +214,8 @@ int run_reconstruct_command(int argc, char* argv[])
     if (strategy == ReconstructionStrategy::beam) {
         std::cout << "Beam width: " << beam_width << '\n';
     }
+    std::cout << "Format evidence: "
+              << (format == ReconstructionFormat::png ? "png" : "none") << '\n';
     std::cout << "Fragments loaded: " << fragments.size() << '\n'
               << "Graph edges: " << graph.edge_count() << '\n'
               << "Minimum overlap: " << minimum_overlap << " bytes\n";
@@ -196,6 +230,11 @@ int run_reconstruct_command(int argc, char* argv[])
                       << "Total overlap: " << candidate.total_overlap_bytes << " bytes\n"
                       << "Recovered bytes: " << candidate.recovered_size << '\n'
                       << "Status: " << (candidate.complete ? "complete" : "incomplete") << '\n';
+            if (candidate.evidence.format.has_value()) {
+                for (const auto& fact : candidate.evidence.format->facts) {
+                    std::cout << fact.name << ": " << fact.value << '\n';
+                }
+            }
         }
         std::cout << "\nSelected candidate: #1\n"
                   << "States expanded: " << beam_result->statistics.states_expanded << '\n'

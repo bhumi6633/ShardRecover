@@ -23,7 +23,7 @@ void print_help()
                  "      [--shuffle] [--opaque-names] [--seed <integer>] --output <directory>\n"
                  "  shardrecover reconstruct <fragment-directory> [--min-overlap <bytes>]\n"
                  "      [--strategy <greedy|beam>] [--beam-width <count>]\n"
-                 "      [--candidates <count>] --output <file>\n"
+                 "      [--candidates <count>] [--format <none|png>] --output <file>\n"
                  "\n"
                  "Commands:\n"
                  "  analyze      Find directional byte overlaps between fragment files\n"
@@ -122,7 +122,8 @@ int main(int argc, char* argv[])
             std::cerr << "Error: " << error.what() << '\n'
                       << "Usage: shardrecover reconstruct <fragment-directory> "
                          "[--min-overlap <bytes>] [--strategy <greedy|beam>] "
-                         "[--beam-width <count>] [--candidates <count>] --output <file>\n";
+                         "[--beam-width <count>] [--candidates <count>] "
+                         "[--format <none|png>] --output <file>\n";
             return 1;
         }
     }
