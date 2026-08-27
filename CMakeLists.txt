@@ -66,6 +66,11 @@ if(BUILD_TESTING)
     add_executable(damage_tests tests/damage_tests.cpp)
     target_link_libraries(damage_tests PRIVATE shardrecover_core)
     add_test(NAME damage_tests COMMAND damage_tests)
+
+    add_executable(corruption_tolerant_overlap_tests
+        tests/corruption_tolerant_overlap_tests.cpp)
+    target_link_libraries(corruption_tolerant_overlap_tests PRIVATE shardrecover_core)
+    add_test(NAME corruption_tolerant_overlap_tests COMMAND corruption_tolerant_overlap_tests)
 endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -81,5 +86,6 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(png_analyzer_tests PRIVATE -Wall -Wextra -Wpedantic)
         target_compile_options(format_reconstruction_tests PRIVATE -Wall -Wextra -Wpedantic)
         target_compile_options(damage_tests PRIVATE -Wall -Wextra -Wpedantic)
+        target_compile_options(corruption_tolerant_overlap_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 endif()
