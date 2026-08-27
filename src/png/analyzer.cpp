@@ -43,6 +43,59 @@ bool valid_chunk_type(const std::array<char, 4>& type)
     });
 }
 
+std::uint32_t update_crc(std::uint32_t crc, std::byte value)
+{
+    crc ^= std::to_integer<std::uint8_t>(value);
+    for (int bit = 0; bit < 8; ++bit) {
+        const auto mask = 0U - (crc & 1U);
+        crc = (crc >> 1U) ^ (0xedb88320U & mask);
+    }
+    return crc;
+}
+
+std::uint32_t chunk_crc(const std::array<char, 4>& type, std::span<const std::byte> data)
+{
+    std::uint32_t crc = 0xffffffffU;
+    for (const auto value : type) {
+        crc = update_crc(crc, static_cast<std::byte>(static_cast<unsigned char>(value)));
+    }
+    for (const auto value : data) {
+        crc = update_crc(crc, value);
+    }
+    return crc ^ 0xffffffffU;
+}
+
+bool valid_bit_depth(std::uint8_t color_type, std::uint8_t bit_depth)
+{
+    switch (color_type) {
+    case 0:
+        return bit_depth == 1 || bit_depth == 2 || bit_depth == 4 || bit_depth == 8
+               || bit_depth == 16;
+    case 2:
+    case 4:
+    case 6:
+        return bit_depth == 8 || bit_depth == 16;
+    case 3:
+        return bit_depth == 1 || bit_depth == 2 || bit_depth == 4 || bit_depth == 8;
+    default:
+        return false;
+    }
+}
+
+bool is_structural_issue(IssueCode code)
+{
+    return code <= IssueCode::trailing_data;
+}
+
+bool is_semantic_issue(IssueCode code)
+{
+    return code == IssueCode::invalid_compression_method
+           || code == IssueCode::invalid_filter_method
+           || code == IssueCode::invalid_interlace_method
+           || code == IssueCode::invalid_color_type_bit_depth
+           || code == IssueCode::nonconsecutive_idat;
+}
+
 Ihdr parse_ihdr(std::span<const std::byte> data)
 {
     return Ihdr{
@@ -73,6 +126,7 @@ AnalysisResult Analyzer::analyze(std::span<const std::byte> bytes)
     std::size_t idat_count = 0;
     std::size_t iend_count = 0;
     bool truncated = false;
+    bool idat_sequence_ended = false;
 
     while (offset < bytes.size()) {
         const auto remaining = bytes.size() - offset;
@@ -108,7 +162,17 @@ AnalysisResult Analyzer::analyze(std::span<const std::byte> bytes)
         const auto data = bytes.subspan(data_offset, length);
         const auto stored_crc = read_u32_be(
             std::span<const std::byte, 4>{bytes.subspan(crc_offset, 4)});
-        result.chunks.push_back(ChunkView{offset, length, type, data, stored_crc});
+        const auto computed_crc = chunk_crc(type, data);
+        const bool crc_valid = stored_crc == computed_crc;
+        result.chunks.push_back(
+            ChunkView{offset, length, type, data, stored_crc, computed_crc, crc_valid});
+        if (crc_valid) {
+            ++result.valid_crc_count;
+        } else {
+            ++result.invalid_crc_count;
+            add_issue(result, IssueCode::crc_mismatch, offset,
+                      "PNG chunk CRC does not match its type and data");
+        }
 
         const bool ihdr = is_type(type, "IHDR");
         const bool idat = is_type(type, "IDAT");
@@ -129,10 +193,32 @@ AnalysisResult Analyzer::analyze(std::span<const std::byte> bytes)
                     add_issue(result, IssueCode::invalid_dimensions, offset,
                               "PNG width and height must be nonzero");
                 }
+                if (result.ihdr->compression_method != 0) {
+                    add_issue(result, IssueCode::invalid_compression_method, offset,
+                              "PNG compression method must be zero");
+                }
+                if (result.ihdr->filter_method != 0) {
+                    add_issue(result, IssueCode::invalid_filter_method, offset,
+                              "PNG filter method must be zero");
+                }
+                if (result.ihdr->interlace_method > 1) {
+                    add_issue(result, IssueCode::invalid_interlace_method, offset,
+                              "PNG interlace method must be zero or one");
+                }
+                if (!valid_bit_depth(result.ihdr->color_type, result.ihdr->bit_depth)) {
+                    add_issue(result, IssueCode::invalid_color_type_bit_depth, offset,
+                              "PNG color type and bit depth combination is invalid");
+                }
             }
         }
         if (idat) {
+            if (idat_sequence_ended) {
+                add_issue(result, IssueCode::nonconsecutive_idat, offset,
+                          "PNG IDAT chunks must be consecutive");
+            }
             ++idat_count;
+        } else if (idat_count != 0) {
+            idat_sequence_ended = true;
         }
         if (iend) {
             ++iend_count;
@@ -162,7 +248,17 @@ AnalysisResult Analyzer::analyze(std::span<const std::byte> bytes)
     }
 
     result.parsing_completed = !truncated;
-    result.structurally_valid = result.parsing_completed && result.issues.empty();
+    result.structurally_valid = result.parsing_completed
+                                && std::none_of(result.issues.begin(), result.issues.end(),
+                                                [](const auto& issue) {
+                                                    return is_structural_issue(issue.code);
+                                                });
+    result.semantically_valid = result.structurally_valid
+                                && std::none_of(result.issues.begin(), result.issues.end(),
+                                                [](const auto& issue) {
+                                                    return is_semantic_issue(issue.code);
+                                                });
+    result.all_crcs_valid = !result.chunks.empty() && result.invalid_crc_count == 0;
     return result;
 }
 

@@ -25,6 +25,12 @@ enum class IssueCode {
     duplicate_iend,
     invalid_iend_length,
     trailing_data,
+    crc_mismatch,
+    invalid_compression_method,
+    invalid_filter_method,
+    invalid_interlace_method,
+    invalid_color_type_bit_depth,
+    nonconsecutive_idat,
 };
 
 struct AnalysisIssue {
@@ -39,6 +45,8 @@ struct ChunkView {
     std::array<char, 4> type;
     std::span<const std::byte> data;
     std::uint32_t stored_crc;
+    std::uint32_t computed_crc;
+    bool crc_valid;
 };
 
 struct Ihdr {
@@ -55,6 +63,10 @@ struct AnalysisResult {
     bool signature_valid = false;
     bool parsing_completed = false;
     bool structurally_valid = false;
+    bool semantically_valid = false;
+    std::size_t valid_crc_count = 0;
+    std::size_t invalid_crc_count = 0;
+    bool all_crcs_valid = false;
     std::vector<ChunkView> chunks;
     std::optional<Ihdr> ihdr;
     std::vector<AnalysisIssue> issues;
