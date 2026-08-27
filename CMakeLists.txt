@@ -21,6 +21,7 @@ add_library(shardrecover_core
     src/png/reconstruction_evaluator.cpp
     src/repair.cpp
     src/reconstruction.cpp
+    src/thread_pool.cpp
 )
 target_include_directories(shardrecover_core PUBLIC include)
 
