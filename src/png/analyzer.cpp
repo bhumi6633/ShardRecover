@@ -1,4 +1,5 @@
 #include "shardrecover/png/analyzer.hpp"
+#include "shardrecover/png/crc.hpp"
 
 #include <algorithm>
 #include <array>
@@ -41,28 +42,6 @@ bool valid_chunk_type(const std::array<char, 4>& type)
     return std::all_of(type.begin(), type.end(), [](char value) {
         return std::isalpha(static_cast<unsigned char>(value)) != 0;
     });
-}
-
-std::uint32_t update_crc(std::uint32_t crc, std::byte value)
-{
-    crc ^= std::to_integer<std::uint8_t>(value);
-    for (int bit = 0; bit < 8; ++bit) {
-        const auto mask = 0U - (crc & 1U);
-        crc = (crc >> 1U) ^ (0xedb88320U & mask);
-    }
-    return crc;
-}
-
-std::uint32_t chunk_crc(const std::array<char, 4>& type, std::span<const std::byte> data)
-{
-    std::uint32_t crc = 0xffffffffU;
-    for (const auto value : type) {
-        crc = update_crc(crc, static_cast<std::byte>(static_cast<unsigned char>(value)));
-    }
-    for (const auto value : data) {
-        crc = update_crc(crc, value);
-    }
-    return crc ^ 0xffffffffU;
 }
 
 bool valid_bit_depth(std::uint8_t color_type, std::uint8_t bit_depth)
@@ -162,7 +141,7 @@ AnalysisResult Analyzer::analyze(std::span<const std::byte> bytes)
         const auto data = bytes.subspan(data_offset, length);
         const auto stored_crc = read_u32_be(
             std::span<const std::byte, 4>{bytes.subspan(crc_offset, 4)});
-        const auto computed_crc = chunk_crc(type, data);
+        const auto computed_crc = compute_chunk_crc(type, data);
         const bool crc_valid = stored_crc == computed_crc;
         result.chunks.push_back(
             ChunkView{offset, length, type, data, stored_crc, computed_crc, crc_valid});

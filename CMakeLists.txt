@@ -16,6 +16,8 @@ add_library(shardrecover_core
     src/fragment_graph.cpp
     src/overlap.cpp
     src/png/analyzer.cpp
+    src/png/crc.cpp
+    src/png/repair.cpp
     src/png/reconstruction_evaluator.cpp
     src/repair.cpp
     src/reconstruction.cpp
