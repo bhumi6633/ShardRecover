@@ -1,6 +1,7 @@
 #include "fragment_command.hpp"
 
 #include "shardrecover/binary_file.hpp"
+#include "shardrecover/damage.hpp"
 #include "shardrecover/fragment_emitter.hpp"
 #include "shardrecover/fragment_generator.hpp"
 
@@ -86,12 +87,20 @@ int run_fragment_command(int argc, char* argv[])
     std::filesystem::path output_path;
     std::size_t fragment_size = 0;
     std::size_t overlap = 0;
+    std::size_t duplicate_count = 0;
+    std::size_t noise_count = 0;
+    std::size_t drop_count = 0;
+    std::size_t corrupt_byte_count = 0;
     std::optional<std::uint64_t> requested_seed;
     bool has_size = false;
     bool has_overlap = false;
     bool has_output = false;
     bool shuffle = false;
     bool opaque_names = false;
+    bool has_duplicates = false;
+    bool has_noise = false;
+    bool has_drop = false;
+    bool has_corrupt_bytes = false;
 
     for (int index = 1; index < argc; ++index) {
         const std::string_view option{argv[index]};
@@ -134,6 +143,42 @@ int run_fragment_command(int argc, char* argv[])
                 throw std::runtime_error("--seed requires a value");
             }
             requested_seed = parse_seed(argv[index]);
+        } else if (option == "--duplicates") {
+            if (has_duplicates) {
+                throw std::runtime_error("--duplicates may only be specified once");
+            }
+            if (++index >= argc) {
+                throw std::runtime_error("--duplicates requires a value");
+            }
+            duplicate_count = parse_byte_count(argv[index], "duplicate count");
+            has_duplicates = true;
+        } else if (option == "--noise") {
+            if (has_noise) {
+                throw std::runtime_error("--noise may only be specified once");
+            }
+            if (++index >= argc) {
+                throw std::runtime_error("--noise requires a value");
+            }
+            noise_count = parse_byte_count(argv[index], "noise count");
+            has_noise = true;
+        } else if (option == "--drop") {
+            if (has_drop) {
+                throw std::runtime_error("--drop may only be specified once");
+            }
+            if (++index >= argc) {
+                throw std::runtime_error("--drop requires a value");
+            }
+            drop_count = parse_byte_count(argv[index], "drop count");
+            has_drop = true;
+        } else if (option == "--corrupt-bytes") {
+            if (has_corrupt_bytes) {
+                throw std::runtime_error("--corrupt-bytes may only be specified once");
+            }
+            if (++index >= argc) {
+                throw std::runtime_error("--corrupt-bytes requires a value");
+            }
+            corrupt_byte_count = parse_byte_count(argv[index], "corrupt byte count");
+            has_corrupt_bytes = true;
         } else if (option == "--output") {
             if (has_output) {
                 throw std::runtime_error("--output may only be specified once");
@@ -154,17 +199,22 @@ int run_fragment_command(int argc, char* argv[])
     if (!has_output) {
         throw std::runtime_error("Missing required option: --output <directory>");
     }
-    if (requested_seed.has_value() && !shuffle && !opaque_names) {
-        throw std::runtime_error("--seed requires --shuffle or --opaque-names");
-    }
-
     const auto input = BinaryFile::load(input_path);
-    auto fragments = FragmentGenerator::generate(input.bytes(), fragment_size, overlap);
+    const auto original_fragments = FragmentGenerator::generate(input.bytes(), fragment_size, overlap);
 
-    const bool uses_randomness = shuffle || opaque_names;
+    const bool uses_damage = duplicate_count != 0 || noise_count != 0 || drop_count != 0
+                             || corrupt_byte_count != 0;
+    const bool uses_randomness = shuffle || opaque_names || uses_damage;
+    if (requested_seed.has_value() && !uses_randomness) {
+        throw std::runtime_error("--seed requires randomized emission or dataset damage");
+    }
     const auto seed = uses_randomness
                           ? requested_seed.value_or(random_seed())
                           : std::uint64_t{0};
+    const auto damage = DamageSimulator::apply(
+        original_fragments,
+        DamageConfig{duplicate_count, noise_count, drop_count, corrupt_byte_count, seed});
+    auto fragments = damage.fragments;
     if (shuffle) {
         FragmentEmitter::shuffle(fragments, seed);
     }
@@ -183,7 +233,10 @@ int run_fragment_command(int argc, char* argv[])
         throw std::runtime_error("Output path is not a directory: '" + output_path.string() + "'");
     }
 
-    const auto last_index = fragments.empty() ? 0 : fragments.size() - 1;
+    std::size_t last_index = 0;
+    for (const auto& fragment : fragments) {
+        last_index = std::max(last_index, fragment.index);
+    }
     const auto name_width = std::max<std::size_t>(4, std::to_string(last_index).size());
     for (std::size_t position = 0; position < fragments.size(); ++position) {
         const auto& fragment = fragments[position];
@@ -198,7 +251,12 @@ int run_fragment_command(int argc, char* argv[])
               << "Fragment size: " << fragment_size << " bytes\n"
               << "Overlap: " << overlap << " bytes\n"
               << "Stride: " << fragment_size - overlap << " bytes\n"
-              << "Fragments written: " << fragments.size() << '\n'
+              << "Original fragments: " << damage.original_fragment_count << '\n'
+              << "Dropped: " << damage.dropped_original_ids.size() << '\n'
+              << "Duplicates added: " << damage.duplicates.size() << '\n'
+              << "Noise fragments added: " << damage.noise_fragment_ids.size() << '\n'
+              << "Corrupted bytes: " << damage.corruptions.size() << '\n'
+              << "Fragments emitted: " << fragments.size() << '\n'
               << "Shuffled: " << (shuffle ? "yes" : "no") << '\n'
               << "Opaque names: " << (opaque_names ? "yes" : "no") << '\n';
     if (uses_randomness) {
