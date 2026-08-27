@@ -14,6 +14,7 @@ add_library(shardrecover_core
     src/fragment_emitter.cpp
     src/fragment_generator.cpp
     src/fragment_graph.cpp
+    src/fragment_loader.cpp
     src/mapped_file.cpp
     src/overlap.cpp
     src/png/analyzer.cpp

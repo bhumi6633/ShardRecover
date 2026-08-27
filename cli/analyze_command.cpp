@@ -82,6 +82,17 @@ std::string_view strategy_name(GraphBuildStrategy strategy)
     return strategy == GraphBuildStrategy::indexed ? "indexed" : "exhaustive";
 }
 
+FileLoadStrategy parse_io_strategy(std::string_view value)
+{
+    if (value == "buffered") {
+        return FileLoadStrategy::buffered;
+    }
+    if (value == "mmap") {
+        return FileLoadStrategy::mapped;
+    }
+    throw std::runtime_error("Invalid I/O strategy: '" + std::string(value) + "'");
+}
+
 }  // namespace
 
 int run_analyze_command(int argc, char* argv[])
@@ -96,11 +107,13 @@ int run_analyze_command(int argc, char* argv[])
     std::size_t max_mismatches = 0;
     GraphBuildStrategy graph_strategy = GraphBuildStrategy::exhaustive;
     std::size_t threads = 1;
+    FileLoadStrategy io_strategy = FileLoadStrategy::buffered;
     bool has_minimum = false;
     bool has_top = false;
     bool has_max_mismatches = false;
     bool has_graph_strategy = false;
     bool has_threads = false;
+    bool has_io_strategy = false;
 
     for (int index = 1; index < argc; ++index) {
         const std::string_view option{argv[index]};
@@ -149,12 +162,21 @@ int run_analyze_command(int argc, char* argv[])
             }
             threads = parse_thread_count(argv[index]);
             has_threads = true;
+        } else if (option == "--io") {
+            if (has_io_strategy) {
+                throw std::runtime_error("--io may only be specified once");
+            }
+            if (++index >= argc || std::string_view(argv[index]).starts_with("--")) {
+                throw std::runtime_error("--io requires buffered or mmap");
+            }
+            io_strategy = parse_io_strategy(argv[index]);
+            has_io_strategy = true;
         } else {
             throw std::runtime_error("Unexpected argument: '" + std::string(option) + "'");
         }
     }
 
-    const auto fragments = load_fragment_directory(directory);
+    const auto fragments = load_fragment_directory(directory, io_strategy);
 
     const auto start = std::chrono::steady_clock::now();
     GraphBuildStats graph_stats;
@@ -168,6 +190,8 @@ int run_analyze_command(int argc, char* argv[])
         graph.edges().begin(), graph.edges().end(), [](const auto& edge) { return edge.exact; }));
 
     std::cout << "Fragments analyzed: " << fragments.size() << '\n'
+              << "I/O strategy: "
+              << (io_strategy == FileLoadStrategy::mapped ? "mmap" : "buffered") << '\n'
               << "Graph nodes: " << graph.node_count() << '\n'
               << "Graph build requested: " << strategy_name(graph_stats.requested_strategy) << '\n'
               << "Graph build effective: " << strategy_name(graph_stats.effective_strategy) << '\n'

@@ -21,6 +21,7 @@ void print_help()
                  "  shardrecover analyze <fragment-directory> [--min-overlap <bytes>]\n"
                  "      [--max-mismatches <count>] [--graph-build <exhaustive|indexed>]\n"
                  "      [--threads <count>] [--top <count>]\n"
+                 "      [--io <buffered|mmap>]\n"
                  "  shardrecover fragment <input> --size <bytes> [--overlap <bytes>]\n"
                  "      [--shuffle] [--opaque-names] [--seed <integer>]\n"
                  "      [--duplicates <count>] [--noise <count>] [--drop <count>]\n"
@@ -29,6 +30,7 @@ void print_help()
                  "      [--max-mismatches <count>]\n"
                  "      [--graph-build <exhaustive|indexed>]\n"
                  "      [--threads <count>]\n"
+                 "      [--io <buffered|mmap>]\n"
                  "      [--strategy <greedy|beam>] [--beam-width <count>]\n"
                  "      [--candidates <count>] [--format <none|png>]\n"
                  "      [--repair <none|consensus|png>] [--repair-report <file>] --output <file>\n"
@@ -120,7 +122,7 @@ int main(int argc, char* argv[])
                       << "Usage: shardrecover analyze <fragment-directory> "
                          "[--min-overlap <bytes>] [--max-mismatches <count>] "
                          "[--graph-build <exhaustive|indexed>] [--threads <count>] "
-                         "[--top <count>]\n";
+                         "[--io <buffered|mmap>] [--top <count>]\n";
             return 1;
         }
     }
@@ -135,6 +137,7 @@ int main(int argc, char* argv[])
                          "[--max-mismatches <count>] "
                          "[--graph-build <exhaustive|indexed>] "
                          "[--threads <count>] "
+                         "[--io <buffered|mmap>] "
                          "[--beam-width <count>] [--candidates <count>] "
                          "[--format <none|png>] [--repair <none|consensus|png>] "
                          "[--repair-report <file>] --output <file>\n";

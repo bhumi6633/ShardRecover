@@ -67,8 +67,18 @@ BinaryFile BinaryFile::load(const std::filesystem::path& path)
     return BinaryFile(path, std::move(data));
 }
 
+BinaryFile BinaryFile::map(const std::filesystem::path& path)
+{
+    return BinaryFile(path, MappedFile(path));
+}
+
 BinaryFile::BinaryFile(std::filesystem::path path, std::vector<std::byte> data)
-    : path_(std::move(path)), data_(std::move(data))
+    : path_(std::move(path)), storage_(std::move(data))
+{
+}
+
+BinaryFile::BinaryFile(std::filesystem::path path, MappedFile mapping)
+    : path_(std::move(path)), storage_(std::move(mapping))
 {
 }
 
@@ -79,17 +89,25 @@ const std::filesystem::path& BinaryFile::path() const noexcept
 
 std::span<const std::byte> BinaryFile::bytes() const noexcept
 {
-    return data_;
+    if (const auto* data = std::get_if<std::vector<std::byte>>(&storage_)) {
+        return *data;
+    }
+    return std::get<MappedFile>(storage_).bytes();
 }
 
 std::size_t BinaryFile::size() const noexcept
 {
-    return data_.size();
+    return bytes().size();
 }
 
 bool BinaryFile::empty() const noexcept
 {
-    return data_.empty();
+    return bytes().empty();
+}
+
+bool BinaryFile::mapped() const noexcept
+{
+    return std::holds_alternative<MappedFile>(storage_);
 }
 
 }  // namespace shardrecover

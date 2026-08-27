@@ -94,6 +94,17 @@ std::string_view graph_strategy_name(GraphBuildStrategy strategy)
     return strategy == GraphBuildStrategy::indexed ? "indexed" : "exhaustive";
 }
 
+FileLoadStrategy parse_io_strategy(std::string_view value)
+{
+    if (value == "buffered") {
+        return FileLoadStrategy::buffered;
+    }
+    if (value == "mmap") {
+        return FileLoadStrategy::mapped;
+    }
+    throw std::runtime_error("Invalid I/O strategy: '" + std::string(value) + "'");
+}
+
 void write_reconstruction(const std::filesystem::path& path,
                           std::span<const std::byte> bytes)
 {
@@ -185,6 +196,7 @@ int run_reconstruct_command(int argc, char* argv[])
     RepairStrategy repair_strategy = RepairStrategy::none;
     GraphBuildStrategy graph_strategy = GraphBuildStrategy::exhaustive;
     std::size_t threads = 1;
+    FileLoadStrategy io_strategy = FileLoadStrategy::buffered;
     std::filesystem::path repair_report_path;
     bool has_minimum = false;
     bool has_output = false;
@@ -197,6 +209,7 @@ int run_reconstruct_command(int argc, char* argv[])
     bool has_repair_report = false;
     bool has_graph_strategy = false;
     bool has_threads = false;
+    bool has_io_strategy = false;
 
     for (int index = 1; index < argc; ++index) {
         const std::string_view option{argv[index]};
@@ -236,6 +249,15 @@ int run_reconstruct_command(int argc, char* argv[])
             }
             threads = parse_positive_count(argv[index], "Thread count");
             has_threads = true;
+        } else if (option == "--io") {
+            if (has_io_strategy) {
+                throw std::runtime_error("--io may only be specified once");
+            }
+            if (++index >= argc || std::string_view(argv[index]).starts_with("--")) {
+                throw std::runtime_error("--io requires buffered or mmap");
+            }
+            io_strategy = parse_io_strategy(argv[index]);
+            has_io_strategy = true;
         } else if (option == "--strategy") {
             if (has_strategy) {
                 throw std::runtime_error("--strategy may only be specified once");
@@ -345,7 +367,7 @@ int run_reconstruct_command(int argc, char* argv[])
         throw std::runtime_error("--repair-report requires consensus or PNG repair");
     }
 
-    const auto fragments = load_fragment_directory(directory);
+    const auto fragments = load_fragment_directory(directory, io_strategy);
     if (fragments.empty()) {
         throw std::runtime_error("Fragment directory contains no regular files: '"
                                  + directory.string() + "'");
@@ -393,6 +415,8 @@ int run_reconstruct_command(int argc, char* argv[])
 
     std::cout << "Reconstruction strategy: "
               << (strategy == ReconstructionStrategy::beam ? "beam" : "greedy") << '\n';
+    std::cout << "I/O strategy: "
+              << (io_strategy == FileLoadStrategy::mapped ? "mmap" : "buffered") << '\n';
     std::cout << "Graph build requested: " << graph_strategy_name(graph_stats.requested_strategy) << '\n'
               << "Graph build effective: " << graph_strategy_name(graph_stats.effective_strategy) << '\n'
               << "Graph build fallback: " << (graph_stats.approximate_fallback ? "yes" : "no") << '\n'
