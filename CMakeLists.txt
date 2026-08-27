@@ -33,6 +33,9 @@ add_executable(shardrecover
 )
 target_link_libraries(shardrecover PRIVATE shardrecover_core)
 
+add_executable(shardrecover_graph_bench benchmarks/graph_benchmark.cpp)
+target_link_libraries(shardrecover_graph_bench PRIVATE shardrecover_core)
+
 if(BUILD_TESTING)
     add_executable(binary_file_tests tests/binary_file_tests.cpp)
     target_link_libraries(binary_file_tests PRIVATE shardrecover_core)
@@ -87,6 +90,7 @@ endif()
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(shardrecover_core PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(shardrecover PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(shardrecover_graph_bench PRIVATE -Wall -Wextra -Wpedantic)
     if(BUILD_TESTING)
         target_compile_options(binary_file_tests PRIVATE -Wall -Wextra -Wpedantic)
         target_compile_options(fragment_emitter_tests PRIVATE -Wall -Wextra -Wpedantic)
