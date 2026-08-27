@@ -3,6 +3,7 @@
 #include "fragment_directory.hpp"
 #include "shardrecover/fragment_graph.hpp"
 #include "shardrecover/png/reconstruction_evaluator.hpp"
+#include "shardrecover/repair.hpp"
 #include "shardrecover/reconstruction.hpp"
 
 #include <algorithm>
@@ -12,8 +13,10 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iomanip>
 #include <optional>
 #include <span>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -30,6 +33,11 @@ enum class ReconstructionStrategy {
 enum class ReconstructionFormat {
     none,
     png,
+};
+
+enum class RepairStrategy {
+    none,
+    consensus,
 };
 
 std::size_t parse_minimum_overlap(std::string_view value)
@@ -85,6 +93,45 @@ void write_reconstruction(const std::filesystem::path& path,
     }
 }
 
+std::string hex_byte(std::byte value)
+{
+    std::ostringstream output;
+    output << std::hex << std::setfill('0') << std::setw(2)
+           << std::to_integer<unsigned int>(value);
+    return output.str();
+}
+
+void write_repair_report(const std::filesystem::path& path, const RepairResult& result)
+{
+    std::ofstream output(path, std::ios::trunc);
+    if (!output) {
+        throw std::runtime_error("Failed to create repair report: '" + path.string() + "'");
+    }
+    output << "status\tposition\tbaseline\tresult\tsupport\tobservations\tvotes\n";
+    for (const auto& repair : result.repairs) {
+        output << "repaired\t" << repair.position << '\t' << hex_byte(repair.baseline_value)
+               << '\t' << hex_byte(repair.repaired_value) << '\t' << repair.supporting_votes
+               << '\t' << repair.total_observations << "\t-\n";
+    }
+    for (const auto& ambiguity : result.ambiguities) {
+        output << "ambiguous\t" << ambiguity.position << '\t'
+               << hex_byte(ambiguity.preserved_value) << "\t-\t-\t"
+               << ambiguity.total_observations << '\t';
+        for (std::size_t index = 0; index < ambiguity.votes.size(); ++index) {
+            if (index != 0) {
+                output << ',';
+            }
+            output << hex_byte(ambiguity.votes[index].value) << ':'
+                   << ambiguity.votes[index].votes;
+        }
+        output << '\n';
+    }
+    output.close();
+    if (!output) {
+        throw std::runtime_error("Failed to write repair report: '" + path.string() + "'");
+    }
+}
+
 }  // namespace
 
 int run_reconstruct_command(int argc, char* argv[])
@@ -101,6 +148,8 @@ int run_reconstruct_command(int argc, char* argv[])
     std::size_t max_mismatches = 0;
     ReconstructionStrategy strategy = ReconstructionStrategy::greedy;
     ReconstructionFormat format = ReconstructionFormat::none;
+    RepairStrategy repair_strategy = RepairStrategy::none;
+    std::filesystem::path repair_report_path;
     bool has_minimum = false;
     bool has_output = false;
     bool has_strategy = false;
@@ -108,6 +157,8 @@ int run_reconstruct_command(int argc, char* argv[])
     bool has_candidate_count = false;
     bool has_format = false;
     bool has_max_mismatches = false;
+    bool has_repair = false;
+    bool has_repair_report = false;
 
     for (int index = 1; index < argc; ++index) {
         const std::string_view option{argv[index]};
@@ -181,6 +232,31 @@ int run_reconstruct_command(int argc, char* argv[])
                                          + std::string(value) + "'");
             }
             has_format = true;
+        } else if (option == "--repair") {
+            if (has_repair) {
+                throw std::runtime_error("--repair may only be specified once");
+            }
+            if (++index >= argc || std::string_view(argv[index]).starts_with("--")) {
+                throw std::runtime_error("--repair requires none or consensus");
+            }
+            const std::string_view value{argv[index]};
+            if (value == "none") {
+                repair_strategy = RepairStrategy::none;
+            } else if (value == "consensus") {
+                repair_strategy = RepairStrategy::consensus;
+            } else {
+                throw std::runtime_error("Invalid repair strategy: '" + std::string(value) + "'");
+            }
+            has_repair = true;
+        } else if (option == "--repair-report") {
+            if (has_repair_report) {
+                throw std::runtime_error("--repair-report may only be specified once");
+            }
+            if (++index >= argc || std::string_view(argv[index]).starts_with("--")) {
+                throw std::runtime_error("--repair-report requires a file path");
+            }
+            repair_report_path = argv[index];
+            has_repair_report = true;
         } else if (option == "--output") {
             if (has_output) {
                 throw std::runtime_error("--output may only be specified once");
@@ -203,6 +279,9 @@ int run_reconstruct_command(int argc, char* argv[])
     }
     if (strategy == ReconstructionStrategy::greedy && format != ReconstructionFormat::none) {
         throw std::runtime_error("--format png requires --strategy beam");
+    }
+    if (has_repair_report && repair_strategy != RepairStrategy::consensus) {
+        throw std::runtime_error("--repair-report requires --repair consensus");
     }
 
     const auto fragments = load_fragment_directory(directory);
@@ -228,10 +307,21 @@ int run_reconstruct_command(int argc, char* argv[])
     }
     const auto search_time = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - search_start);
-    write_reconstruction(output_path, result.bytes);
+    std::optional<RepairResult> repair_result;
+    if (repair_strategy == RepairStrategy::consensus) {
+        repair_result = ConsensusRepairer::repair(result, fragment_span);
+        write_reconstruction(output_path, repair_result->bytes);
+        if (has_repair_report) {
+            write_repair_report(repair_report_path, *repair_result);
+        }
+    } else {
+        write_reconstruction(output_path, result.bytes);
+    }
 
     std::cout << "Reconstruction strategy: "
               << (strategy == ReconstructionStrategy::beam ? "beam" : "greedy") << '\n';
+    std::cout << "Repair strategy: "
+              << (repair_strategy == RepairStrategy::consensus ? "consensus" : "none") << '\n';
     if (strategy == ReconstructionStrategy::beam) {
         std::cout << "Beam width: " << beam_width << '\n';
     }
@@ -292,6 +382,18 @@ int run_reconstruct_command(int argc, char* argv[])
     if (!result.complete) {
         std::cout << "Unresolved fragments: " << unresolved << '\n'
                   << "Exit status: 2 (partial output written)\n";
+    }
+    if (repair_result.has_value()) {
+        std::cout << "\nConsensus analysis:\n"
+                  << "Positions with redundant coverage: "
+                  << repair_result->redundant_positions << '\n'
+                  << "Conflicting positions: " << repair_result->conflicting_positions << '\n'
+                  << "Corroborated positions: " << repair_result->corroborated_positions << '\n'
+                  << "Bytes repaired: " << repair_result->repairs.size() << '\n'
+                  << "Ambiguous conflicts: " << repair_result->ambiguities.size() << '\n';
+        if (has_repair_report) {
+            std::cout << "Repair report: " << repair_report_path.string() << '\n';
+        }
     }
     std::cout << "Output: " << output_path.string() << '\n';
     return result.complete ? 0 : 2;

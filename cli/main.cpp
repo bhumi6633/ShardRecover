@@ -27,7 +27,8 @@ void print_help()
                  "  shardrecover reconstruct <fragment-directory> [--min-overlap <bytes>]\n"
                  "      [--max-mismatches <count>]\n"
                  "      [--strategy <greedy|beam>] [--beam-width <count>]\n"
-                 "      [--candidates <count>] [--format <none|png>] --output <file>\n"
+                 "      [--candidates <count>] [--format <none|png>]\n"
+                 "      [--repair <none|consensus>] [--repair-report <file>] --output <file>\n"
                  "\n"
                  "Commands:\n"
                  "  analyze      Find directional byte overlaps between fragment files\n"
@@ -128,7 +129,8 @@ int main(int argc, char* argv[])
                          "[--min-overlap <bytes>] [--strategy <greedy|beam>] "
                          "[--max-mismatches <count>] "
                          "[--beam-width <count>] [--candidates <count>] "
-                         "[--format <none|png>] --output <file>\n";
+                         "[--format <none|png>] [--repair <none|consensus>] "
+                         "[--repair-report <file>] --output <file>\n";
             return 1;
         }
     }
