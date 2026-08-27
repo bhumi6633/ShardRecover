@@ -4,6 +4,28 @@ project(ShardRecover LANGUAGES CXX)
 
 include(CTest)
 
+option(SHARDRECOVER_ENABLE_SANITIZERS
+    "Build ShardRecover targets with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+option(SHARDRECOVER_ENABLE_FUZZING
+    "Build libFuzzer targets (requires Clang or AppleClang)" OFF)
+
+if(SHARDRECOVER_ENABLE_FUZZING AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "SHARDRECOVER_ENABLE_FUZZING requires Clang or AppleClang")
+endif()
+
+if(SHARDRECOVER_ENABLE_SANITIZERS OR SHARDRECOVER_ENABLE_FUZZING)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        message(FATAL_ERROR "ShardRecover sanitizer builds require GCC, Clang, or AppleClang")
+    endif()
+    add_library(shardrecover_sanitizers INTERFACE)
+    target_compile_options(shardrecover_sanitizers INTERFACE
+        -fsanitize=address,undefined
+        -fno-omit-frame-pointer)
+    target_link_options(shardrecover_sanitizers INTERFACE
+        -fsanitize=address,undefined
+        -fno-omit-frame-pointer)
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -26,6 +48,9 @@ add_library(shardrecover_core
     src/thread_pool.cpp
 )
 target_include_directories(shardrecover_core PUBLIC include)
+if(TARGET shardrecover_sanitizers)
+    target_link_libraries(shardrecover_core PUBLIC shardrecover_sanitizers)
+endif()
 
 add_executable(shardrecover
     cli/analyze_command.cpp
