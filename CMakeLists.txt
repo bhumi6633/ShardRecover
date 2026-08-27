@@ -64,6 +64,18 @@ target_link_libraries(shardrecover PRIVATE shardrecover_core)
 add_executable(shardrecover_graph_bench benchmarks/graph_benchmark.cpp)
 target_link_libraries(shardrecover_graph_bench PRIVATE shardrecover_core)
 
+if(SHARDRECOVER_ENABLE_FUZZING)
+    add_executable(shardrecover_png_fuzz fuzz/png_analyzer_fuzz.cpp)
+    target_link_libraries(shardrecover_png_fuzz PRIVATE shardrecover_core)
+    target_compile_options(shardrecover_png_fuzz PRIVATE -fsanitize=fuzzer)
+    target_link_options(shardrecover_png_fuzz PRIVATE -fsanitize=fuzzer)
+
+    add_executable(shardrecover_overlap_fuzz fuzz/overlap_fuzz.cpp)
+    target_link_libraries(shardrecover_overlap_fuzz PRIVATE shardrecover_core)
+    target_compile_options(shardrecover_overlap_fuzz PRIVATE -fsanitize=fuzzer)
+    target_link_options(shardrecover_overlap_fuzz PRIVATE -fsanitize=fuzzer)
+endif()
+
 if(BUILD_TESTING)
     add_executable(binary_file_tests tests/binary_file_tests.cpp)
     target_link_libraries(binary_file_tests PRIVATE shardrecover_core)
