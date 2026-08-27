@@ -14,6 +14,7 @@ add_library(shardrecover_core
     src/fragment_generator.cpp
     src/fragment_graph.cpp
     src/overlap.cpp
+    src/png/analyzer.cpp
     src/reconstruction.cpp
 )
 target_include_directories(shardrecover_core PUBLIC include)
