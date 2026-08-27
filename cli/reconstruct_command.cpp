@@ -3,6 +3,7 @@
 #include "fragment_directory.hpp"
 #include "shardrecover/fragment_graph.hpp"
 #include "shardrecover/png/reconstruction_evaluator.hpp"
+#include "shardrecover/png/repair.hpp"
 #include "shardrecover/repair.hpp"
 #include "shardrecover/reconstruction.hpp"
 
@@ -38,6 +39,7 @@ enum class ReconstructionFormat {
 enum class RepairStrategy {
     none,
     consensus,
+    png,
 };
 
 std::size_t parse_minimum_overlap(std::string_view value)
@@ -101,30 +103,46 @@ std::string hex_byte(std::byte value)
     return output.str();
 }
 
-void write_repair_report(const std::filesystem::path& path, const RepairResult& result)
+void write_repair_report(const std::filesystem::path& path,
+                         const RepairResult& consensus,
+                         const png::CrcRepairResult* png_result)
 {
     std::ofstream output(path, std::ios::trunc);
     if (!output) {
         throw std::runtime_error("Failed to create repair report: '" + path.string() + "'");
     }
-    output << "status\tposition\tbaseline\tresult\tsupport\tobservations\tvotes\n";
-    for (const auto& repair : result.repairs) {
-        output << "repaired\t" << repair.position << '\t' << hex_byte(repair.baseline_value)
-               << '\t' << hex_byte(repair.repaired_value) << '\t' << repair.supporting_votes
-               << '\t' << repair.total_observations << "\t-\n";
+    output << "status\tposition\tstage\tbaseline\tresult\tevidence\n";
+    for (const auto& repair : consensus.repairs) {
+        output << "repaired\t" << repair.position << "\tconsensus\t"
+               << hex_byte(repair.baseline_value) << '\t' << hex_byte(repair.repaired_value)
+               << '\t' << repair.supporting_votes << '/' << repair.total_observations
+               << " votes\n";
     }
-    for (const auto& ambiguity : result.ambiguities) {
-        output << "ambiguous\t" << ambiguity.position << '\t'
-               << hex_byte(ambiguity.preserved_value) << "\t-\t-\t"
-               << ambiguity.total_observations << '\t';
-        for (std::size_t index = 0; index < ambiguity.votes.size(); ++index) {
-            if (index != 0) {
-                output << ',';
-            }
-            output << hex_byte(ambiguity.votes[index].value) << ':'
-                   << ambiguity.votes[index].votes;
+    if (png_result != nullptr) {
+        for (const auto& repair : png_result->repairs) {
+            output << (repair.changed ? "repaired" : "corroborated") << '\t'
+                   << repair.position << "\tpng_crc\t" << hex_byte(repair.previous_value)
+                   << '\t' << hex_byte(repair.crc_consistent_value)
+                   << "\tCRC-consistent observed candidate; stored=" << std::hex
+                   << std::setfill('0') << std::setw(8) << repair.stored_crc << std::dec << '\n';
         }
-        output << '\n';
+        for (const auto& unresolved : png_result->unresolved) {
+            output << "unresolved\t" << unresolved.position
+                   << "\tpng_crc\t-\t-\t" << unresolved.reason << '\n';
+        }
+    } else {
+        for (const auto& ambiguity : consensus.ambiguities) {
+            output << "ambiguous\t" << ambiguity.position << "\tconsensus\t"
+                   << hex_byte(ambiguity.preserved_value) << "\t-\t";
+            for (std::size_t index = 0; index < ambiguity.votes.size(); ++index) {
+                if (index != 0) {
+                    output << ',';
+                }
+                output << hex_byte(ambiguity.votes[index].value) << ':'
+                       << ambiguity.votes[index].votes;
+            }
+            output << '\n';
+        }
     }
     output.close();
     if (!output) {
@@ -237,13 +255,15 @@ int run_reconstruct_command(int argc, char* argv[])
                 throw std::runtime_error("--repair may only be specified once");
             }
             if (++index >= argc || std::string_view(argv[index]).starts_with("--")) {
-                throw std::runtime_error("--repair requires none or consensus");
+                throw std::runtime_error("--repair requires none, consensus, or png");
             }
             const std::string_view value{argv[index]};
             if (value == "none") {
                 repair_strategy = RepairStrategy::none;
             } else if (value == "consensus") {
                 repair_strategy = RepairStrategy::consensus;
+            } else if (value == "png") {
+                repair_strategy = RepairStrategy::png;
             } else {
                 throw std::runtime_error("Invalid repair strategy: '" + std::string(value) + "'");
             }
@@ -280,8 +300,11 @@ int run_reconstruct_command(int argc, char* argv[])
     if (strategy == ReconstructionStrategy::greedy && format != ReconstructionFormat::none) {
         throw std::runtime_error("--format png requires --strategy beam");
     }
-    if (has_repair_report && repair_strategy != RepairStrategy::consensus) {
-        throw std::runtime_error("--repair-report requires --repair consensus");
+    if (repair_strategy == RepairStrategy::png && format != ReconstructionFormat::png) {
+        throw std::runtime_error("--repair png requires --format png");
+    }
+    if (has_repair_report && repair_strategy == RepairStrategy::none) {
+        throw std::runtime_error("--repair-report requires consensus or PNG repair");
     }
 
     const auto fragments = load_fragment_directory(directory);
@@ -308,11 +331,19 @@ int run_reconstruct_command(int argc, char* argv[])
     const auto search_time = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - search_start);
     std::optional<RepairResult> repair_result;
-    if (repair_strategy == RepairStrategy::consensus) {
+    std::optional<png::CrcRepairResult> png_repair_result;
+    if (repair_strategy != RepairStrategy::none) {
         repair_result = ConsensusRepairer::repair(result, fragment_span);
-        write_reconstruction(output_path, repair_result->bytes);
+        if (repair_strategy == RepairStrategy::png) {
+            png_repair_result = png::CrcGuidedRepairer::repair(*repair_result);
+            write_reconstruction(output_path, png_repair_result->bytes);
+        } else {
+            write_reconstruction(output_path, repair_result->bytes);
+        }
         if (has_repair_report) {
-            write_repair_report(repair_report_path, *repair_result);
+            write_repair_report(repair_report_path,
+                                *repair_result,
+                                png_repair_result.has_value() ? &*png_repair_result : nullptr);
         }
     } else {
         write_reconstruction(output_path, result.bytes);
@@ -320,8 +351,12 @@ int run_reconstruct_command(int argc, char* argv[])
 
     std::cout << "Reconstruction strategy: "
               << (strategy == ReconstructionStrategy::beam ? "beam" : "greedy") << '\n';
-    std::cout << "Repair strategy: "
-              << (repair_strategy == RepairStrategy::consensus ? "consensus" : "none") << '\n';
+    std::cout << "Repair strategy: ";
+    if (repair_strategy == RepairStrategy::png) {
+        std::cout << "consensus + PNG CRC\n";
+    } else {
+        std::cout << (repair_strategy == RepairStrategy::consensus ? "consensus" : "none") << '\n';
+    }
     if (strategy == ReconstructionStrategy::beam) {
         std::cout << "Beam width: " << beam_width << '\n';
     }
@@ -384,13 +419,35 @@ int run_reconstruct_command(int argc, char* argv[])
                   << "Exit status: 2 (partial output written)\n";
     }
     if (repair_result.has_value()) {
-        std::cout << "\nConsensus analysis:\n"
+        std::cout << "\nConsensus stage:\n"
                   << "Positions with redundant coverage: "
                   << repair_result->redundant_positions << '\n'
                   << "Conflicting positions: " << repair_result->conflicting_positions << '\n'
                   << "Corroborated positions: " << repair_result->corroborated_positions << '\n'
                   << "Bytes repaired: " << repair_result->repairs.size() << '\n'
                   << "Ambiguous conflicts: " << repair_result->ambiguities.size() << '\n';
+        if (png_repair_result.has_value()) {
+            const auto changed = static_cast<std::size_t>(std::count_if(
+                png_repair_result->repairs.begin(), png_repair_result->repairs.end(),
+                [](const auto& repair) { return repair.changed; }));
+            std::cout << "\nPNG CRC stage:\n"
+                      << "Eligible ambiguous bytes: "
+                      << png_repair_result->eligible_ambiguous_bytes << '\n'
+                      << "Chunks evaluated: " << png_repair_result->chunks_evaluated << '\n'
+                      << "CRC-consistent resolutions: "
+                      << png_repair_result->repairs.size() << '\n'
+                      << "Bytes changed: " << changed << '\n'
+                      << "Still unresolved: " << png_repair_result->unresolved.size() << '\n'
+                      << "PNG validation before repair: CRC valid "
+                      << png_repair_result->before.valid_crc_count << " / "
+                      << png_repair_result->before.parsed_chunks << '\n'
+                      << "PNG validation after repair: CRC valid "
+                      << png_repair_result->after.valid_crc_count << " / "
+                      << png_repair_result->after.parsed_chunks << '\n'
+                      << "PNG structure after repair: "
+                      << (png_repair_result->after.structurally_valid ? "valid" : "invalid")
+                      << '\n';
+        }
         if (has_repair_report) {
             std::cout << "Repair report: " << repair_report_path.string() << '\n';
         }
