@@ -1,9 +1,11 @@
 #include "shardrecover/fragment_graph.hpp"
 
 #include "shardrecover/overlap.hpp"
+#include "shardrecover/thread_pool.hpp"
 
 #include <algorithm>
 #include <cstdint>
+#include <future>
 #include <limits>
 #include <stdexcept>
 #include <unordered_map>
@@ -54,6 +56,11 @@ struct FingerprintKeyHash {
     }
 };
 
+struct CandidatePair {
+    std::size_t from;
+    std::size_t to;
+};
+
 std::vector<std::uint64_t> prefix_fingerprints(std::span<const std::byte> bytes)
 {
     std::vector<std::uint64_t> prefixes(bytes.size() + 1, 0);
@@ -77,6 +84,21 @@ FragmentEdge make_edge(std::size_t from,
                         result.mismatch_details};
 }
 
+std::vector<FragmentEdge> evaluate_exact_pairs(
+    std::span<const BinaryFile> fragments,
+    std::span<const CandidatePair> pairs)
+{
+    std::vector<FragmentEdge> edges;
+    for (const auto& pair : pairs) {
+        const auto result = find_suffix_prefix_overlap(fragments[pair.from].bytes(),
+                                                       fragments[pair.to].bytes());
+        if (result.length != 0) {
+            edges.push_back(make_edge(pair.from, pair.to, result));
+        }
+    }
+    return edges;
+}
+
 }  // namespace
 
 FragmentGraph FragmentGraph::build(std::span<const BinaryFile> fragments,
@@ -86,7 +108,8 @@ FragmentGraph FragmentGraph::build(std::span<const BinaryFile> fragments,
     return build(fragments,
                  GraphBuildConfig{minimum_overlap,
                                   max_mismatches,
-                                  GraphBuildStrategy::exhaustive});
+                                  GraphBuildStrategy::exhaustive,
+                                  1});
 }
 
 FragmentGraph FragmentGraph::build(std::span<const BinaryFile> fragments,
@@ -95,6 +118,9 @@ FragmentGraph FragmentGraph::build(std::span<const BinaryFile> fragments,
 {
     if (config.minimum_overlap == 0) {
         throw std::invalid_argument("Minimum overlap must be greater than zero");
+    }
+    if (config.threads == 0) {
+        throw std::invalid_argument("Graph build thread count must be greater than zero");
     }
 
     GraphBuildStats local_stats;
@@ -116,7 +142,9 @@ FragmentGraph FragmentGraph::build(std::span<const BinaryFile> fragments,
         graph.nodes_.push_back(FragmentNode{id, fragments[id].path(), fragments[id].size()});
     }
 
-    if (local_stats.effective_strategy == GraphBuildStrategy::indexed) {
+    std::vector<CandidatePair> exact_pairs;
+    if (config.max_mismatches == 0
+        && local_stats.effective_strategy == GraphBuildStrategy::indexed) {
         std::size_t maximum_size = 0;
         for (const auto& fragment : fragments) {
             maximum_size = std::max(maximum_size, fragment.size());
@@ -163,11 +191,19 @@ FragmentGraph FragmentGraph::build(std::span<const BinaryFile> fragments,
                     }
                     checked[to] = true;
                     ++local_stats.full_overlap_checks;
-                    const auto result = find_suffix_prefix_overlap(source, fragments[to].bytes());
-                    if (result.length >= config.minimum_overlap) {
-                        graph.edges_.push_back(make_edge(from, to, result));
-                    }
+                    exact_pairs.push_back(CandidatePair{from, to});
                 }
+            }
+        }
+    } else if (config.max_mismatches == 0) {
+        for (std::size_t from = 0; from < fragments.size(); ++from) {
+            for (std::size_t to = 0; to < fragments.size(); ++to) {
+                if (from == to) {
+                    continue;
+                }
+                ++local_stats.candidate_pairs;
+                ++local_stats.full_overlap_checks;
+                exact_pairs.push_back(CandidatePair{from, to});
             }
         }
     } else {
@@ -188,6 +224,45 @@ FragmentGraph FragmentGraph::build(std::span<const BinaryFile> fragments,
                 }
             }
         }
+    }
+
+    local_stats.threads_used = config.max_mismatches == 0 && !exact_pairs.empty()
+                                   ? config.threads
+                                   : 1;
+    if (!exact_pairs.empty()) {
+        if (config.threads == 1) {
+            graph.edges_ = evaluate_exact_pairs(fragments, exact_pairs);
+        } else {
+            ThreadPool pool(config.threads);
+            const auto target_batches = std::min(
+                exact_pairs.size(),
+                config.threads <= std::numeric_limits<std::size_t>::max() / 4
+                    ? config.threads * 4
+                    : exact_pairs.size());
+            const auto batch_size = std::max<std::size_t>(
+                1, exact_pairs.size() / target_batches
+                       + (exact_pairs.size() % target_batches != 0 ? 1 : 0));
+            std::vector<std::future<std::vector<FragmentEdge>>> futures;
+            for (std::size_t begin = 0; begin < exact_pairs.size(); begin += batch_size) {
+                const auto count = std::min(batch_size, exact_pairs.size() - begin);
+                futures.push_back(pool.submit([fragments,
+                                               pairs = std::span<const CandidatePair>{
+                                                   exact_pairs.data() + begin, count}] {
+                    return evaluate_exact_pairs(fragments, pairs);
+                }));
+            }
+            for (auto& future : futures) {
+                auto edges = future.get();
+                graph.edges_.insert(graph.edges_.end(),
+                                    std::make_move_iterator(edges.begin()),
+                                    std::make_move_iterator(edges.end()));
+            }
+        }
+        graph.edges_.erase(
+            std::remove_if(graph.edges_.begin(), graph.edges_.end(), [&](const auto& edge) {
+                return edge.overlap < config.minimum_overlap;
+            }),
+            graph.edges_.end());
     }
 
     const auto nodes = std::span<const FragmentNode>{graph.nodes_};

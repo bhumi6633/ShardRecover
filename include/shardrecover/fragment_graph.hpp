@@ -35,6 +35,7 @@ struct GraphBuildConfig {
     std::size_t minimum_overlap;
     std::size_t max_mismatches = 0;
     GraphBuildStrategy strategy = GraphBuildStrategy::exhaustive;
+    std::size_t threads = 1;
 };
 
 struct GraphBuildStats {
@@ -45,6 +46,7 @@ struct GraphBuildStats {
     std::size_t candidate_pairs = 0;
     std::size_t full_overlap_checks = 0;
     std::size_t edges_created = 0;
+    std::size_t threads_used = 1;
 };
 
 class FragmentGraph {

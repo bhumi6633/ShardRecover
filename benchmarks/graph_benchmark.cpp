@@ -38,6 +38,7 @@ struct Options {
     std::size_t iterations = 5;
     std::uint64_t seed = 42;
     StrategySelection strategy = StrategySelection::both;
+    std::size_t threads = 1;
 };
 
 struct Result {
@@ -100,6 +101,8 @@ Options parse_options(int argc, char* argv[])
             } else {
                 throw std::runtime_error("Strategy must be exhaustive, indexed, or both");
             }
+        } else if (option == "--threads") {
+            options.threads = parse_count(value, "thread count");
         } else {
             throw std::runtime_error("Unexpected argument: '" + std::string(option) + "'");
         }
@@ -127,7 +130,7 @@ Result run_benchmark(std::span<const shardrecover::BinaryFile> files,
         const auto start = std::chrono::steady_clock::now();
         const auto graph = shardrecover::FragmentGraph::build(
             files,
-            shardrecover::GraphBuildConfig{options.overlap, 0, strategy},
+            shardrecover::GraphBuildConfig{options.overlap, 0, strategy, options.threads},
             &statistics);
         const auto elapsed = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - start);
@@ -150,6 +153,7 @@ void print_result(const Result& result)
     const auto [minimum, maximum] = std::minmax_element(result.milliseconds.begin(),
                                                         result.milliseconds.end());
     std::cout << "\nStrategy: " << strategy_name(result.strategy) << '\n'
+              << "Threads: " << result.statistics.threads_used << '\n'
               << "Graph nodes: " << result.nodes << '\n'
               << "Graph edges: " << result.edges << '\n'
               << "Directed pairs possible: " << result.statistics.theoretical_pairs << '\n'
@@ -274,7 +278,7 @@ int main(int argc, char* argv[])
                   << "Usage: shardrecover_graph_bench --fragments <count> "
                      "--fragment-size <bytes> --overlap <bytes> "
                      "--iterations <count> --seed <integer> "
-                     "--strategy <exhaustive|indexed|both>\n";
+                     "--strategy <exhaustive|indexed|both> --threads <count>\n";
         return 1;
     }
 }

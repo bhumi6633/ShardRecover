@@ -184,6 +184,7 @@ int run_reconstruct_command(int argc, char* argv[])
     ReconstructionFormat format = ReconstructionFormat::none;
     RepairStrategy repair_strategy = RepairStrategy::none;
     GraphBuildStrategy graph_strategy = GraphBuildStrategy::exhaustive;
+    std::size_t threads = 1;
     std::filesystem::path repair_report_path;
     bool has_minimum = false;
     bool has_output = false;
@@ -195,6 +196,7 @@ int run_reconstruct_command(int argc, char* argv[])
     bool has_repair = false;
     bool has_repair_report = false;
     bool has_graph_strategy = false;
+    bool has_threads = false;
 
     for (int index = 1; index < argc; ++index) {
         const std::string_view option{argv[index]};
@@ -225,6 +227,15 @@ int run_reconstruct_command(int argc, char* argv[])
             }
             graph_strategy = parse_graph_strategy(argv[index]);
             has_graph_strategy = true;
+        } else if (option == "--threads") {
+            if (has_threads) {
+                throw std::runtime_error("--threads may only be specified once");
+            }
+            if (++index >= argc || std::string_view(argv[index]).starts_with("--")) {
+                throw std::runtime_error("--threads requires a positive integer");
+            }
+            threads = parse_positive_count(argv[index], "Thread count");
+            has_threads = true;
         } else if (option == "--strategy") {
             if (has_strategy) {
                 throw std::runtime_error("--strategy may only be specified once");
@@ -344,7 +355,7 @@ int run_reconstruct_command(int argc, char* argv[])
     GraphBuildStats graph_stats;
     const auto graph = FragmentGraph::build(
         fragment_span,
-        GraphBuildConfig{minimum_overlap, max_mismatches, graph_strategy},
+        GraphBuildConfig{minimum_overlap, max_mismatches, graph_strategy, threads},
         &graph_stats);
     const auto search_start = std::chrono::steady_clock::now();
     ReconstructionResult result;
@@ -387,6 +398,7 @@ int run_reconstruct_command(int argc, char* argv[])
               << "Graph build fallback: " << (graph_stats.approximate_fallback ? "yes" : "no") << '\n'
               << "Candidate pairs: " << graph_stats.candidate_pairs << '\n'
               << "Full overlap checks: " << graph_stats.full_overlap_checks << '\n';
+    std::cout << "Threads used: " << graph_stats.threads_used << '\n';
     std::cout << "Repair strategy: ";
     if (repair_strategy == RepairStrategy::png) {
         std::cout << "consensus + PNG CRC\n";

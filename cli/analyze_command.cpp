@@ -55,6 +55,17 @@ std::size_t parse_mismatch_count(std::string_view value)
     return count;
 }
 
+std::size_t parse_thread_count(std::string_view value)
+{
+    std::size_t count = 0;
+    const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), count);
+    if (value.empty() || error != std::errc{} || end != value.data() + value.size() || count == 0) {
+        throw std::runtime_error("Thread count must be a positive integer: '"
+                                 + std::string(value) + "'");
+    }
+    return count;
+}
+
 GraphBuildStrategy parse_graph_strategy(std::string_view value)
 {
     if (value == "exhaustive") {
@@ -84,10 +95,12 @@ int run_analyze_command(int argc, char* argv[])
     std::size_t top_count = 20;
     std::size_t max_mismatches = 0;
     GraphBuildStrategy graph_strategy = GraphBuildStrategy::exhaustive;
+    std::size_t threads = 1;
     bool has_minimum = false;
     bool has_top = false;
     bool has_max_mismatches = false;
     bool has_graph_strategy = false;
+    bool has_threads = false;
 
     for (int index = 1; index < argc; ++index) {
         const std::string_view option{argv[index]};
@@ -127,6 +140,15 @@ int run_analyze_command(int argc, char* argv[])
             }
             graph_strategy = parse_graph_strategy(argv[index]);
             has_graph_strategy = true;
+        } else if (option == "--threads") {
+            if (has_threads) {
+                throw std::runtime_error("--threads may only be specified once");
+            }
+            if (++index >= argc || std::string_view(argv[index]).starts_with("--")) {
+                throw std::runtime_error("--threads requires a positive integer");
+            }
+            threads = parse_thread_count(argv[index]);
+            has_threads = true;
         } else {
             throw std::runtime_error("Unexpected argument: '" + std::string(option) + "'");
         }
@@ -138,7 +160,7 @@ int run_analyze_command(int argc, char* argv[])
     GraphBuildStats graph_stats;
     const auto graph = FragmentGraph::build(
         std::span<const BinaryFile>{fragments},
-        GraphBuildConfig{minimum_overlap, max_mismatches, graph_strategy},
+        GraphBuildConfig{minimum_overlap, max_mismatches, graph_strategy, threads},
         &graph_stats);
     const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - start);
@@ -153,6 +175,7 @@ int run_analyze_command(int argc, char* argv[])
               << "Directed pairs possible: " << graph_stats.theoretical_pairs << '\n'
               << "Candidate pairs: " << graph_stats.candidate_pairs << '\n'
               << "Full overlap checks: " << graph_stats.full_overlap_checks << '\n'
+              << "Threads used: " << graph_stats.threads_used << '\n'
               << "Graph edges: " << graph.edge_count() << '\n'
               << "Exact edges: " << exact_edges << '\n'
               << "Approximate edges: " << graph.edge_count() - exact_edges << '\n'
