@@ -17,6 +17,7 @@ add_library(shardrecover_core
     src/overlap.cpp
     src/png/analyzer.cpp
     src/png/reconstruction_evaluator.cpp
+    src/repair.cpp
     src/reconstruction.cpp
 )
 target_include_directories(shardrecover_core PUBLIC include)
