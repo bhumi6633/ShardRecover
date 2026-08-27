@@ -3,7 +3,10 @@
 #include "shardrecover/overlap.hpp"
 
 #include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace shardrecover {
 namespace {
@@ -34,15 +37,78 @@ bool edge_less(const FragmentEdge& left,
     return left.from != right.from ? left.from < right.from : left.to < right.to;
 }
 
+constexpr std::uint64_t fingerprint_base = 1099511628211ULL;
+
+struct FingerprintKey {
+    std::size_t length;
+    std::uint64_t value;
+
+    bool operator==(const FingerprintKey&) const = default;
+};
+
+struct FingerprintKeyHash {
+    std::size_t operator()(const FingerprintKey& key) const noexcept
+    {
+        return static_cast<std::size_t>(key.value ^ (key.value >> 32U))
+               ^ (key.length * 0x9e3779b9U);
+    }
+};
+
+std::vector<std::uint64_t> prefix_fingerprints(std::span<const std::byte> bytes)
+{
+    std::vector<std::uint64_t> prefixes(bytes.size() + 1, 0);
+    for (std::size_t index = 0; index < bytes.size(); ++index) {
+        prefixes[index + 1] = prefixes[index] * fingerprint_base
+                              + std::to_integer<std::uint8_t>(bytes[index]) + 1U;
+    }
+    return prefixes;
+}
+
+FragmentEdge make_edge(std::size_t from,
+                       std::size_t to,
+                       const OverlapResult& result)
+{
+    return FragmentEdge{from,
+                        to,
+                        result.length,
+                        result.matches,
+                        result.mismatches,
+                        result.exact,
+                        result.mismatch_details};
+}
+
 }  // namespace
 
 FragmentGraph FragmentGraph::build(std::span<const BinaryFile> fragments,
                                    std::size_t minimum_overlap,
                                    std::size_t max_mismatches)
 {
-    if (minimum_overlap == 0) {
+    return build(fragments,
+                 GraphBuildConfig{minimum_overlap,
+                                  max_mismatches,
+                                  GraphBuildStrategy::exhaustive});
+}
+
+FragmentGraph FragmentGraph::build(std::span<const BinaryFile> fragments,
+                                   const GraphBuildConfig& config,
+                                   GraphBuildStats* statistics)
+{
+    if (config.minimum_overlap == 0) {
         throw std::invalid_argument("Minimum overlap must be greater than zero");
     }
+
+    GraphBuildStats local_stats;
+    local_stats.requested_strategy = config.strategy;
+    local_stats.effective_strategy = config.strategy;
+    if (config.max_mismatches != 0 && config.strategy == GraphBuildStrategy::indexed) {
+        local_stats.effective_strategy = GraphBuildStrategy::exhaustive;
+        local_stats.approximate_fallback = true;
+    }
+    if (!fragments.empty()
+        && fragments.size() - 1 > std::numeric_limits<std::size_t>::max() / fragments.size()) {
+        throw std::overflow_error("Theoretical graph pair count overflows size_t");
+    }
+    local_stats.theoretical_pairs = fragments.size() * (fragments.size() - 1);
 
     FragmentGraph graph;
     graph.nodes_.reserve(fragments.size());
@@ -50,24 +116,76 @@ FragmentGraph FragmentGraph::build(std::span<const BinaryFile> fragments,
         graph.nodes_.push_back(FragmentNode{id, fragments[id].path(), fragments[id].size()});
     }
 
-    for (std::size_t from = 0; from < fragments.size(); ++from) {
-        for (std::size_t to = 0; to < fragments.size(); ++to) {
-            if (from == to) {
+    if (local_stats.effective_strategy == GraphBuildStrategy::indexed) {
+        std::size_t maximum_size = 0;
+        for (const auto& fragment : fragments) {
+            maximum_size = std::max(maximum_size, fragment.size());
+        }
+        std::vector<std::uint64_t> powers(maximum_size + 1, 1);
+        for (std::size_t length = 1; length < powers.size(); ++length) {
+            powers[length] = powers[length - 1] * fingerprint_base;
+        }
+
+        std::unordered_map<FingerprintKey, std::vector<std::size_t>, FingerprintKeyHash>
+            prefix_index;
+        prefix_index.reserve(fragments.size());
+        for (std::size_t node_id = 0; node_id < fragments.size(); ++node_id) {
+            const auto bytes = fragments[node_id].bytes();
+            const auto prefixes = prefix_fingerprints(bytes);
+            for (std::size_t length = config.minimum_overlap; length <= bytes.size(); ++length) {
+                prefix_index[FingerprintKey{length, prefixes[length]}].push_back(node_id);
+            }
+        }
+        for (std::size_t from = 0; from < fragments.size(); ++from) {
+            const auto source = fragments[from].bytes();
+            if (source.size() < config.minimum_overlap) {
                 continue;
             }
-
-            const auto result = find_tolerant_suffix_prefix_overlap(fragments[from].bytes(),
-                                                                    fragments[to].bytes(),
-                                                                    minimum_overlap,
-                                                                    max_mismatches);
-            if (result.length >= minimum_overlap) {
-                graph.edges_.push_back(FragmentEdge{from,
-                                                    to,
-                                                    result.length,
-                                                    result.matches,
-                                                    result.mismatches,
-                                                    result.exact,
-                                                    result.mismatch_details});
+            const auto prefixes = prefix_fingerprints(source);
+            std::vector<bool> checked(fragments.size(), false);
+            for (std::size_t length = config.minimum_overlap; length <= source.size(); ++length) {
+                const auto suffix_hash = prefixes.back()
+                                         - prefixes[source.size() - length] * powers[length];
+                const auto bucket = prefix_index.find(FingerprintKey{length, suffix_hash});
+                if (bucket == prefix_index.end()) {
+                    continue;
+                }
+                const auto boundary = source.last(length);
+                for (const auto to : bucket->second) {
+                    if (from == to || checked[to]) {
+                        continue;
+                    }
+                    ++local_stats.candidate_pairs;
+                    const auto destination_prefix = fragments[to].bytes().first(length);
+                    if (!std::equal(boundary.begin(), boundary.end(),
+                                    destination_prefix.begin())) {
+                        continue;
+                    }
+                    checked[to] = true;
+                    ++local_stats.full_overlap_checks;
+                    const auto result = find_suffix_prefix_overlap(source, fragments[to].bytes());
+                    if (result.length >= config.minimum_overlap) {
+                        graph.edges_.push_back(make_edge(from, to, result));
+                    }
+                }
+            }
+        }
+    } else {
+        for (std::size_t from = 0; from < fragments.size(); ++from) {
+            for (std::size_t to = 0; to < fragments.size(); ++to) {
+                if (from == to) {
+                    continue;
+                }
+                ++local_stats.candidate_pairs;
+                ++local_stats.full_overlap_checks;
+                const auto result = find_tolerant_suffix_prefix_overlap(
+                    fragments[from].bytes(),
+                    fragments[to].bytes(),
+                    config.minimum_overlap,
+                    config.max_mismatches);
+                if (result.length >= config.minimum_overlap) {
+                    graph.edges_.push_back(make_edge(from, to, result));
+                }
             }
         }
     }
@@ -83,7 +201,6 @@ FragmentGraph FragmentGraph::build(std::span<const BinaryFile> fragments,
         graph.outgoing_[edge.from].push_back(edge);
         graph.incoming_[edge.to].push_back(edge);
     }
-
     for (auto& adjacency : graph.outgoing_) {
         std::sort(adjacency.begin(), adjacency.end(), [nodes](const auto& left, const auto& right) {
             return edge_less(left, right, nodes);
@@ -94,7 +211,10 @@ FragmentGraph FragmentGraph::build(std::span<const BinaryFile> fragments,
             return edge_less(left, right, nodes);
         });
     }
-
+    local_stats.edges_created = graph.edge_count();
+    if (statistics != nullptr) {
+        *statistics = local_stats;
+    }
     return graph;
 }
 

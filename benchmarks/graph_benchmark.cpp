@@ -25,12 +25,27 @@
 
 namespace {
 
+enum class StrategySelection {
+    exhaustive,
+    indexed,
+    both,
+};
+
 struct Options {
     std::size_t fragment_count = 100;
     std::size_t fragment_size = 4096;
     std::size_t overlap = 512;
     std::size_t iterations = 5;
     std::uint64_t seed = 42;
+    StrategySelection strategy = StrategySelection::both;
+};
+
+struct Result {
+    shardrecover::GraphBuildStrategy strategy;
+    shardrecover::GraphBuildStats statistics;
+    std::vector<double> milliseconds;
+    std::size_t nodes = 0;
+    std::size_t edges = 0;
 };
 
 std::uint64_t parse_integer(std::string_view value, std::string_view name)
@@ -75,6 +90,16 @@ Options parse_options(int argc, char* argv[])
             options.iterations = parse_count(value, "iteration count");
         } else if (option == "--seed") {
             options.seed = parse_integer(value, "seed");
+        } else if (option == "--strategy") {
+            if (value == "exhaustive") {
+                options.strategy = StrategySelection::exhaustive;
+            } else if (value == "indexed") {
+                options.strategy = StrategySelection::indexed;
+            } else if (value == "both") {
+                options.strategy = StrategySelection::both;
+            } else {
+                throw std::runtime_error("Strategy must be exhaustive, indexed, or both");
+            }
         } else {
             throw std::runtime_error("Unexpected argument: '" + std::string(option) + "'");
         }
@@ -83,6 +108,57 @@ Options parse_options(int argc, char* argv[])
         throw std::runtime_error("Overlap must be smaller than fragment size");
     }
     return options;
+}
+
+std::string_view strategy_name(shardrecover::GraphBuildStrategy strategy)
+{
+    return strategy == shardrecover::GraphBuildStrategy::indexed ? "indexed" : "exhaustive";
+}
+
+Result run_benchmark(std::span<const shardrecover::BinaryFile> files,
+                     const Options& options,
+                     shardrecover::GraphBuildStrategy strategy)
+{
+    Result result{};
+    result.strategy = strategy;
+    result.milliseconds.reserve(options.iterations);
+    for (std::size_t iteration = 0; iteration < options.iterations; ++iteration) {
+        shardrecover::GraphBuildStats statistics;
+        const auto start = std::chrono::steady_clock::now();
+        const auto graph = shardrecover::FragmentGraph::build(
+            files,
+            shardrecover::GraphBuildConfig{options.overlap, 0, strategy},
+            &statistics);
+        const auto elapsed = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - start);
+        result.milliseconds.push_back(elapsed.count());
+        result.statistics = statistics;
+        result.nodes = graph.node_count();
+        result.edges = graph.edge_count();
+    }
+    return result;
+}
+
+double average_time(const Result& result)
+{
+    return std::accumulate(result.milliseconds.begin(), result.milliseconds.end(), 0.0)
+           / static_cast<double>(result.milliseconds.size());
+}
+
+void print_result(const Result& result)
+{
+    const auto [minimum, maximum] = std::minmax_element(result.milliseconds.begin(),
+                                                        result.milliseconds.end());
+    std::cout << "\nStrategy: " << strategy_name(result.strategy) << '\n'
+              << "Graph nodes: " << result.nodes << '\n'
+              << "Graph edges: " << result.edges << '\n'
+              << "Directed pairs possible: " << result.statistics.theoretical_pairs << '\n'
+              << "Candidate pairs: " << result.statistics.candidate_pairs << '\n'
+              << "Full overlap checks: " << result.statistics.full_overlap_checks << '\n'
+              << std::fixed << std::setprecision(3)
+              << "Average graph build time: " << average_time(result) << " ms\n"
+              << "Minimum graph build time: " << *minimum << " ms\n"
+              << "Maximum graph build time: " << *maximum << " ms\n";
 }
 
 class TemporaryDirectory {
@@ -166,41 +242,39 @@ int main(int argc, char* argv[])
         const auto options = parse_options(argc, argv);
         const TemporaryDirectory directory;
         const auto files = make_dataset(options, directory.path());
-        std::vector<double> milliseconds;
-        milliseconds.reserve(options.iterations);
-        std::size_t nodes = 0;
-        std::size_t edges = 0;
-        for (std::size_t iteration = 0; iteration < options.iterations; ++iteration) {
-            const auto start = std::chrono::steady_clock::now();
-            const auto graph = shardrecover::FragmentGraph::build(files, options.overlap);
-            const auto elapsed = std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - start);
-            milliseconds.push_back(elapsed.count());
-            nodes = graph.node_count();
-            edges = graph.edge_count();
-        }
-        const auto total = std::accumulate(milliseconds.begin(), milliseconds.end(), 0.0);
-        const auto [minimum, maximum] = std::minmax_element(milliseconds.begin(), milliseconds.end());
-        const auto pairs = options.fragment_count * (options.fragment_count - 1);
-        std::cout << "Strategy: exhaustive\n"
-                  << "Fragments: " << options.fragment_count << '\n'
+        std::cout << "Fragments: " << options.fragment_count << '\n'
                   << "Fragment size: " << options.fragment_size << '\n'
                   << "Minimum overlap: " << options.overlap << '\n'
                   << "Seed: " << options.seed << '\n'
-                  << "Iterations: " << options.iterations << '\n'
-                  << "Graph nodes: " << nodes << '\n'
-                  << "Graph edges: " << edges << '\n'
-                  << "Directed pairs considered: " << pairs << '\n'
-                  << std::fixed << std::setprecision(3)
-                  << "Average graph build time: " << total / options.iterations << " ms\n"
-                  << "Minimum graph build time: " << *minimum << " ms\n"
-                  << "Maximum graph build time: " << *maximum << " ms\n";
+                  << "Iterations: " << options.iterations << '\n';
+
+        if (options.strategy == StrategySelection::exhaustive) {
+            print_result(run_benchmark(files, options,
+                                       shardrecover::GraphBuildStrategy::exhaustive));
+        } else if (options.strategy == StrategySelection::indexed) {
+            print_result(run_benchmark(files, options,
+                                       shardrecover::GraphBuildStrategy::indexed));
+        } else {
+            const auto exhaustive = run_benchmark(
+                files, options, shardrecover::GraphBuildStrategy::exhaustive);
+            const auto indexed = run_benchmark(
+                files, options, shardrecover::GraphBuildStrategy::indexed);
+            print_result(exhaustive);
+            print_result(indexed);
+            if (exhaustive.nodes != indexed.nodes || exhaustive.edges != indexed.edges) {
+                throw std::runtime_error("Graph strategies produced different graph sizes");
+            }
+            std::cout << std::fixed << std::setprecision(2)
+                      << "\nIndexed speedup: "
+                      << average_time(exhaustive) / average_time(indexed) << "x\n";
+        }
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "Error: " << error.what() << '\n'
                   << "Usage: shardrecover_graph_bench --fragments <count> "
                      "--fragment-size <bytes> --overlap <bytes> "
-                     "--iterations <count> --seed <integer>\n";
+                     "--iterations <count> --seed <integer> "
+                     "--strategy <exhaustive|indexed|both>\n";
         return 1;
     }
 }

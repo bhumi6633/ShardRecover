@@ -55,6 +55,22 @@ std::size_t parse_mismatch_count(std::string_view value)
     return count;
 }
 
+GraphBuildStrategy parse_graph_strategy(std::string_view value)
+{
+    if (value == "exhaustive") {
+        return GraphBuildStrategy::exhaustive;
+    }
+    if (value == "indexed") {
+        return GraphBuildStrategy::indexed;
+    }
+    throw std::runtime_error("Invalid graph build strategy: '" + std::string(value) + "'");
+}
+
+std::string_view strategy_name(GraphBuildStrategy strategy)
+{
+    return strategy == GraphBuildStrategy::indexed ? "indexed" : "exhaustive";
+}
+
 }  // namespace
 
 int run_analyze_command(int argc, char* argv[])
@@ -67,9 +83,11 @@ int run_analyze_command(int argc, char* argv[])
     std::size_t minimum_overlap = 1;
     std::size_t top_count = 20;
     std::size_t max_mismatches = 0;
+    GraphBuildStrategy graph_strategy = GraphBuildStrategy::exhaustive;
     bool has_minimum = false;
     bool has_top = false;
     bool has_max_mismatches = false;
+    bool has_graph_strategy = false;
 
     for (int index = 1; index < argc; ++index) {
         const std::string_view option{argv[index]};
@@ -100,6 +118,15 @@ int run_analyze_command(int argc, char* argv[])
             }
             max_mismatches = parse_mismatch_count(argv[index]);
             has_max_mismatches = true;
+        } else if (option == "--graph-build") {
+            if (has_graph_strategy) {
+                throw std::runtime_error("--graph-build may only be specified once");
+            }
+            if (++index >= argc || std::string_view(argv[index]).starts_with("--")) {
+                throw std::runtime_error("--graph-build requires exhaustive or indexed");
+            }
+            graph_strategy = parse_graph_strategy(argv[index]);
+            has_graph_strategy = true;
         } else {
             throw std::runtime_error("Unexpected argument: '" + std::string(option) + "'");
         }
@@ -108,18 +135,24 @@ int run_analyze_command(int argc, char* argv[])
     const auto fragments = load_fragment_directory(directory);
 
     const auto start = std::chrono::steady_clock::now();
-    const auto graph = FragmentGraph::build(std::span<const BinaryFile>{fragments},
-                                            minimum_overlap,
-                                            max_mismatches);
+    GraphBuildStats graph_stats;
+    const auto graph = FragmentGraph::build(
+        std::span<const BinaryFile>{fragments},
+        GraphBuildConfig{minimum_overlap, max_mismatches, graph_strategy},
+        &graph_stats);
     const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - start);
-    const auto pair_count = fragments.empty() ? 0 : fragments.size() * (fragments.size() - 1);
     const auto exact_edges = static_cast<std::size_t>(std::count_if(
         graph.edges().begin(), graph.edges().end(), [](const auto& edge) { return edge.exact; }));
 
     std::cout << "Fragments analyzed: " << fragments.size() << '\n'
               << "Graph nodes: " << graph.node_count() << '\n'
-              << "Directed pairs tested: " << pair_count << '\n'
+              << "Graph build requested: " << strategy_name(graph_stats.requested_strategy) << '\n'
+              << "Graph build effective: " << strategy_name(graph_stats.effective_strategy) << '\n'
+              << "Graph build fallback: " << (graph_stats.approximate_fallback ? "yes" : "no") << '\n'
+              << "Directed pairs possible: " << graph_stats.theoretical_pairs << '\n'
+              << "Candidate pairs: " << graph_stats.candidate_pairs << '\n'
+              << "Full overlap checks: " << graph_stats.full_overlap_checks << '\n'
               << "Graph edges: " << graph.edge_count() << '\n'
               << "Exact edges: " << exact_edges << '\n'
               << "Approximate edges: " << graph.edge_count() - exact_edges << '\n'

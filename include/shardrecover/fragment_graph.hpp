@@ -26,11 +26,35 @@ struct FragmentEdge {
     std::vector<OverlapMismatch> mismatch_details;
 };
 
+enum class GraphBuildStrategy {
+    exhaustive,
+    indexed,
+};
+
+struct GraphBuildConfig {
+    std::size_t minimum_overlap;
+    std::size_t max_mismatches = 0;
+    GraphBuildStrategy strategy = GraphBuildStrategy::exhaustive;
+};
+
+struct GraphBuildStats {
+    GraphBuildStrategy requested_strategy = GraphBuildStrategy::exhaustive;
+    GraphBuildStrategy effective_strategy = GraphBuildStrategy::exhaustive;
+    bool approximate_fallback = false;
+    std::size_t theoretical_pairs = 0;
+    std::size_t candidate_pairs = 0;
+    std::size_t full_overlap_checks = 0;
+    std::size_t edges_created = 0;
+};
+
 class FragmentGraph {
 public:
     static FragmentGraph build(std::span<const BinaryFile> fragments,
                                std::size_t minimum_overlap,
                                std::size_t max_mismatches = 0);
+    static FragmentGraph build(std::span<const BinaryFile> fragments,
+                               const GraphBuildConfig& config,
+                               GraphBuildStats* statistics = nullptr);
 
     std::span<const FragmentNode> nodes() const noexcept;
     std::span<const FragmentEdge> edges() const noexcept;
