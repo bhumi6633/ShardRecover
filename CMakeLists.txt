@@ -33,6 +33,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(shardrecover_core
     src/binary_file.cpp
     src/damage.cpp
+    src/evaluation.cpp
     src/fragment_emitter.cpp
     src/fragment_generator.cpp
     src/fragment_graph.cpp

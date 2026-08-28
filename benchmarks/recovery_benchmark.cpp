@@ -1,5 +1,6 @@
 #include "shardrecover/binary_file.hpp"
 #include "shardrecover/damage.hpp"
+#include "shardrecover/evaluation.hpp"
 #include "shardrecover/file_load_strategy.hpp"
 #include "shardrecover/fragment_emitter.hpp"
 #include "shardrecover/fragment_generator.hpp"
@@ -56,6 +57,7 @@ struct Options {
     RepairStrategy repair = RepairStrategy::none;
     Format format = Format::none;
     std::size_t iterations = 1;
+    std::size_t runs = 1;
     bool csv = false;
 };
 
@@ -79,6 +81,7 @@ struct RunResult {
     bool engine_complete = false;
     std::vector<std::byte> output;
     std::vector<std::byte> original;
+    shardrecover::evaluation::RecoveryMetrics metrics;
     std::size_t repair_events = 0;
     Timings timings;
 };
@@ -162,6 +165,8 @@ Options parse_options(int argc, char* argv[])
             else throw std::runtime_error("Format must be none or png");
         } else if (option == "--iterations") {
             options.iterations = parse_size(value, "iteration count", false);
+        } else if (option == "--runs") {
+            options.runs = parse_size(value, "run count", false);
         } else {
             throw std::runtime_error("Unexpected argument: '" + std::string(option) + "'");
         }
@@ -222,14 +227,18 @@ std::vector<std::byte> make_source(const Options& options)
     return source;
 }
 
-void write_dataset(const std::filesystem::path& directory,
-                   std::vector<shardrecover::Fragment>& fragments,
-                   std::uint64_t seed)
+std::vector<shardrecover::evaluation::EmittedFragmentTruth> write_dataset(
+    const std::filesystem::path& directory,
+    std::vector<shardrecover::Fragment>& fragments,
+    std::uint64_t seed)
 {
     shardrecover::FragmentEmitter::shuffle(fragments, seed);
     const auto filenames = shardrecover::FragmentEmitter::opaque_filenames(fragments.size(), seed);
+    std::vector<shardrecover::evaluation::EmittedFragmentTruth> emissions;
+    emissions.reserve(fragments.size());
     for (std::size_t index = 0; index < fragments.size(); ++index) {
-        std::ofstream output(directory / filenames[index], std::ios::binary | std::ios::trunc);
+        const auto path = directory / filenames[index];
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
         const auto& bytes = fragments[index].data;
         if (!bytes.empty()) {
             output.write(reinterpret_cast<const char*>(bytes.data()),
@@ -237,7 +246,9 @@ void write_dataset(const std::filesystem::path& directory,
         }
         output.close();
         if (!output) throw std::runtime_error("Failed to emit benchmark fragment");
+        emissions.push_back({path, fragments[index].index});
     }
+    return emissions;
 }
 
 RunResult run_once(const Options& options)
@@ -256,7 +267,7 @@ RunResult run_once(const Options& options)
     });
 
     const TemporaryDirectory directory;
-    write_dataset(directory.path(), result.damage.fragments, options.seed);
+    const auto emissions = write_dataset(directory.path(), result.damage.fragments, options.seed);
     std::vector<shardrecover::BinaryFile> files;
     result.timings.load_ms = measure([&] {
         files = shardrecover::load_fragment_directory(directory.path(), options.io);
@@ -302,24 +313,26 @@ RunResult run_once(const Options& options)
     });
     result.timings.pipeline_ms = result.timings.load_ms + result.timings.graph_ms
                                  + result.timings.search_ms + result.timings.repair_ms;
+    // Ground truth crosses the boundary only after reconstruction and repair are complete.
+    result.metrics = shardrecover::evaluation::RecoveryEvaluator::evaluate(
+        result.original, originals, result.damage, emissions, graph, reconstruction,
+        result.output, result.repair_events, options.format == Format::png);
     return result;
 }
 
-std::int64_t size_delta(std::size_t output, std::size_t original)
+void print_result(const Options& options,
+                  const RunResult& result,
+                  const Timings& average,
+                  bool csv_header)
 {
-    const auto limit = static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max());
-    if (output > limit || original > limit) throw std::overflow_error("Size delta exceeds int64_t");
-    return static_cast<std::int64_t>(output) - static_cast<std::int64_t>(original);
-}
-
-void print_result(const Options& options, const RunResult& result, const Timings& average)
-{
-    const bool exact = result.output == result.original;
+    const auto& metrics = result.metrics;
     if (options.csv) {
-        std::cout << "seed,input_bytes,fragment_size,overlap,original_fragments,emitted_fragments,"
+        if (csv_header) std::cout << "seed,input_bytes,fragment_size,overlap,original_fragments,emitted_fragments,"
                      "duplicates,noise,dropped,corrupted_bytes,strategy,beam_width,graph_build,threads,"
                      "io,max_mismatches,repair,graph_nodes,graph_edges,candidate_pairs,overlap_checks,"
-                     "selected_fragments,exact_recovery,output_bytes,size_delta,graph_ms,search_ms,"
+                     "selected_fragments,selected_originals,selected_duplicates,selected_noise,"
+                     "recall_numerator,recall_denominator,order_correct,order_comparable,"
+                     "consistent_joins,selected_genuine_joins,exact_recovery,output_bytes,size_delta,graph_ms,search_ms,"
                      "repair_ms,total_ms\n";
         std::cout << options.seed << ',' << result.original.size() << ',' << options.fragment_size << ','
                   << options.overlap << ',' << result.damage.original_fragment_count << ','
@@ -335,8 +348,15 @@ void print_result(const Options& options, const RunResult& result, const Timings
                   << (options.repair == RepairStrategy::none ? "none" : options.repair == RepairStrategy::png ? "png" : "consensus")
                   << ',' << result.graph_nodes << ',' << result.graph_edges << ','
                   << result.graph_stats.candidate_pairs << ',' << result.graph_stats.full_overlap_checks
-                  << ',' << result.selected_fragments << ',' << (exact ? 1 : 0) << ','
-                  << result.output.size() << ',' << size_delta(result.output.size(), result.original.size())
+                  << ',' << result.selected_fragments << ',' << metrics.selected_genuine_originals << ','
+                  << metrics.selected_duplicates << ',' << metrics.selected_noise << ','
+                  << metrics.surviving_originals_represented << ','
+                  << metrics.surviving_originals_total << ','
+                  << metrics.ordered_original_pairs_correct << ','
+                  << metrics.comparable_original_pairs << ','
+                  << metrics.ground_truth_consistent_joins << ','
+                  << metrics.selected_genuine_joins << ',' << (metrics.exact_recovery ? 1 : 0) << ','
+                  << metrics.reconstructed_bytes << ',' << metrics.size_delta
                   << ',' << average.graph_ms << ',' << average.search_ms << ',' << average.repair_ms
                   << ',' << average.pipeline_ms << '\n';
         return;
@@ -351,10 +371,31 @@ void print_result(const Options& options, const RunResult& result, const Timings
               << "Fragments emitted: " << result.damage.fragments.size() << "\n\n"
               << "Reconstruction\n"
               << "Selected fragments: " << result.selected_fragments << '\n'
+              << "Selected genuine originals: " << metrics.selected_genuine_originals << '\n'
+              << "Selected duplicates: " << metrics.selected_duplicates << '\n'
+              << "Selected noise: " << metrics.selected_noise << '\n'
+              << "Surviving original recall: " << metrics.surviving_originals_represented
+              << " / " << metrics.surviving_originals_total;
+    if (const auto rate = metrics.surviving_original_recall()) {
+        std::cout << " = " << std::fixed << std::setprecision(2) << *rate * 100.0 << '%';
+    } else {
+        std::cout << " = N/A";
+    }
+    std::cout << '\n'
+              << "Relative order: " << metrics.ordered_original_pairs_correct << " / "
+              << metrics.comparable_original_pairs;
+    if (const auto rate = metrics.relative_order_accuracy()) {
+        std::cout << " = " << std::fixed << std::setprecision(2) << *rate * 100.0 << '%';
+    } else {
+        std::cout << " = N/A";
+    }
+    std::cout << '\n'
+              << "Consistent genuine joins: " << metrics.ground_truth_consistent_joins << " / "
+              << metrics.selected_genuine_joins << '\n'
               << "Engine complete: " << (result.engine_complete ? "yes" : "no") << '\n'
-              << "Output bytes: " << result.output.size() << '\n'
-              << "Size delta: " << size_delta(result.output.size(), result.original.size()) << '\n'
-              << "Exact recovery: " << (exact ? "yes" : "no") << "\n\n"
+              << "Output bytes: " << metrics.reconstructed_bytes << '\n'
+              << "Size delta: " << metrics.size_delta << '\n'
+              << "Exact recovery: " << (metrics.exact_recovery ? "yes" : "no") << "\n\n"
               << "Graph\n"
               << "Nodes: " << result.graph_nodes << '\n'
               << "Edges: " << result.graph_edges << '\n'
@@ -374,6 +415,32 @@ void print_result(const Options& options, const RunResult& result, const Timings
               << "Repair: " << average.repair_ms << " ms\n"
               << "Total reconstruction pipeline: " << average.pipeline_ms << " ms\n"
               << "Repair events: " << result.repair_events << '\n';
+    if (metrics.png_analysis.has_value()) {
+        const auto& png = *metrics.png_analysis;
+        std::cout << "PNG signature valid: " << (png.signature_valid ? "yes" : "no") << '\n'
+                  << "PNG structurally valid: " << (png.structurally_valid ? "yes" : "no") << '\n'
+                  << "PNG CRCs: " << png.valid_crc_count << " valid, "
+                  << png.invalid_crc_count << " invalid\n";
+    }
+}
+
+void print_aggregate(const shardrecover::evaluation::AggregateMetrics& aggregate,
+                     const Timings& timings)
+{
+    std::cout << "Aggregate\n"
+              << "Runs: " << aggregate.runs << '\n'
+              << "Exact recoveries: " << aggregate.exact_recoveries << " / " << aggregate.runs << '\n'
+              << "Mean surviving-original recall: ";
+    if (const auto value = aggregate.mean_recall()) std::cout << *value * 100.0 << "%\n";
+    else std::cout << "N/A\n";
+    std::cout << "Mean selected noise: " << aggregate.mean_selected_noise() << '\n'
+              << "Mean relative-order accuracy: ";
+    if (const auto value = aggregate.mean_order_accuracy()) std::cout << *value * 100.0 << "%\n";
+    else std::cout << "N/A\n";
+    std::cout << "Mean graph time: " << timings.graph_ms << " ms\n"
+              << "Mean search time: " << timings.search_ms << " ms\n"
+              << "Mean repair time: " << timings.repair_ms << " ms\n"
+              << "Mean pipeline time: " << timings.pipeline_ms << " ms\n";
 }
 
 }  // namespace
@@ -381,28 +448,52 @@ void print_result(const Options& options, const RunResult& result, const Timings
 int main(int argc, char* argv[])
 {
     try {
-        const auto options = parse_options(argc, argv);
-        Timings total;
-        RunResult result;
-        for (std::size_t iteration = 0; iteration < options.iterations; ++iteration) {
-            result = run_once(options);
-            total.generation_ms += result.timings.generation_ms;
-            total.damage_ms += result.timings.damage_ms;
-            total.load_ms += result.timings.load_ms;
-            total.graph_ms += result.timings.graph_ms;
-            total.search_ms += result.timings.search_ms;
-            total.repair_ms += result.timings.repair_ms;
-            total.pipeline_ms += result.timings.pipeline_ms;
+        const auto base_options = parse_options(argc, argv);
+        shardrecover::evaluation::AggregateMetrics aggregate;
+        Timings aggregate_timings;
+        for (std::size_t run = 0; run < base_options.runs; ++run) {
+            if (run > std::numeric_limits<std::uint64_t>::max() - base_options.seed) {
+                throw std::overflow_error("Seed range overflows uint64_t");
+            }
+            auto options = base_options;
+            options.seed += run;
+            Timings total;
+            RunResult result;
+            for (std::size_t iteration = 0; iteration < options.iterations; ++iteration) {
+                result = run_once(options);
+                total.generation_ms += result.timings.generation_ms;
+                total.damage_ms += result.timings.damage_ms;
+                total.load_ms += result.timings.load_ms;
+                total.graph_ms += result.timings.graph_ms;
+                total.search_ms += result.timings.search_ms;
+                total.repair_ms += result.timings.repair_ms;
+                total.pipeline_ms += result.timings.pipeline_ms;
+            }
+            const auto divisor = static_cast<double>(options.iterations);
+            total.generation_ms /= divisor;
+            total.damage_ms /= divisor;
+            total.load_ms /= divisor;
+            total.graph_ms /= divisor;
+            total.search_ms /= divisor;
+            total.repair_ms /= divisor;
+            total.pipeline_ms /= divisor;
+            aggregate.add(result.metrics);
+            aggregate_timings.graph_ms += total.graph_ms;
+            aggregate_timings.search_ms += total.search_ms;
+            aggregate_timings.repair_ms += total.repair_ms;
+            aggregate_timings.pipeline_ms += total.pipeline_ms;
+            if (base_options.runs == 1 || options.csv) {
+                print_result(options, result, total, run == 0);
+            }
         }
-        const auto divisor = static_cast<double>(options.iterations);
-        total.generation_ms /= divisor;
-        total.damage_ms /= divisor;
-        total.load_ms /= divisor;
-        total.graph_ms /= divisor;
-        total.search_ms /= divisor;
-        total.repair_ms /= divisor;
-        total.pipeline_ms /= divisor;
-        print_result(options, result, total);
+        if (base_options.runs > 1 && !base_options.csv) {
+            const auto divisor = static_cast<double>(base_options.runs);
+            aggregate_timings.graph_ms /= divisor;
+            aggregate_timings.search_ms /= divisor;
+            aggregate_timings.repair_ms /= divisor;
+            aggregate_timings.pipeline_ms /= divisor;
+            print_aggregate(aggregate, aggregate_timings);
+        }
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "Error: " << error.what() << '\n'
@@ -411,7 +502,7 @@ int main(int argc, char* argv[])
                      "[--noise N] [--drop N] [--corrupt-bytes N] [--strategy greedy|beam] "
                      "[--beam-width N] [--graph-build exhaustive|indexed] [--threads N] "
                      "[--io buffered|mmap] [--max-mismatches N] [--repair none|consensus|png] "
-                     "[--format none|png] [--iterations N] [--csv]\n";
+                     "[--format none|png] [--iterations N] [--runs N] [--csv]\n";
         return 1;
     }
 }
