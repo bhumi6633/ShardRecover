@@ -47,6 +47,7 @@ add_library(shardrecover_core
     src/repair.cpp
     src/reconstruction.cpp
     src/thread_pool.cpp
+    src/trace.cpp
 )
 target_include_directories(shardrecover_core PUBLIC include)
 if(TARGET shardrecover_sanitizers)
