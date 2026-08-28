@@ -3,9 +3,11 @@
 #include "fragment_directory.hpp"
 #include "shardrecover/fragment_graph.hpp"
 #include "shardrecover/png/reconstruction_evaluator.hpp"
+#include "shardrecover/png/analyzer.hpp"
 #include "shardrecover/png/repair.hpp"
 #include "shardrecover/repair.hpp"
 #include "shardrecover/reconstruction.hpp"
+#include "shardrecover/trace.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -198,6 +200,7 @@ int run_reconstruct_command(int argc, char* argv[])
     std::size_t threads = 1;
     FileLoadStrategy io_strategy = FileLoadStrategy::buffered;
     std::filesystem::path repair_report_path;
+    std::filesystem::path trace_path;
     bool has_minimum = false;
     bool has_output = false;
     bool has_strategy = false;
@@ -210,6 +213,7 @@ int run_reconstruct_command(int argc, char* argv[])
     bool has_graph_strategy = false;
     bool has_threads = false;
     bool has_io_strategy = false;
+    bool has_trace = false;
 
     for (int index = 1; index < argc; ++index) {
         const std::string_view option{argv[index]};
@@ -346,6 +350,13 @@ int run_reconstruct_command(int argc, char* argv[])
             }
             output_path = argv[index];
             has_output = true;
+        } else if (option == "--trace-json") {
+            if (has_trace) throw std::runtime_error("--trace-json may only be specified once");
+            if (++index >= argc || std::string_view(argv[index]).starts_with("--")) {
+                throw std::runtime_error("--trace-json requires a file path");
+            }
+            trace_path = argv[index];
+            has_trace = true;
         } else {
             throw std::runtime_error("Unexpected argument: '" + std::string(option) + "'");
         }
@@ -411,6 +422,29 @@ int run_reconstruct_command(int argc, char* argv[])
         }
     } else {
         write_reconstruction(output_path, result.bytes);
+    }
+
+    if (has_trace) {
+        const std::span<const std::byte> final_bytes = png_repair_result
+            ? std::span<const std::byte>{png_repair_result->bytes}
+            : repair_result ? std::span<const std::byte>{repair_result->bytes}
+                            : std::span<const std::byte>{result.bytes};
+        std::optional<png::AnalysisResult> analysis;
+        if (format == ReconstructionFormat::png) analysis = png::Analyzer::analyze(final_bytes);
+        const auto trace_document = trace::Builder::build(
+            fragment_span, graph, result,
+            trace::Configuration{minimum_overlap, max_mismatches,
+                                 std::string(graph_strategy_name(graph_strategy)), threads,
+                                 strategy == ReconstructionStrategy::beam ? "beam" : "greedy",
+                                 strategy == ReconstructionStrategy::beam ? beam_width : 0,
+                                 io_strategy == FileLoadStrategy::mapped ? "mmap" : "buffered",
+                                 format == ReconstructionFormat::png ? "png" : "none",
+                                 repair_strategy == RepairStrategy::png ? "png"
+                                     : repair_strategy == RepairStrategy::consensus ? "consensus" : "none"},
+            graph_stats, repair_result ? &*repair_result : nullptr,
+            png_repair_result ? &*png_repair_result : nullptr,
+            analysis ? &*analysis : nullptr);
+        trace::write_json_file(trace_document, trace_path);
     }
 
     std::cout << "Reconstruction strategy: "

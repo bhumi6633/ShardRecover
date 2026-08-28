@@ -33,7 +33,8 @@ void print_help()
                  "      [--io <buffered|mmap>]\n"
                  "      [--strategy <greedy|beam>] [--beam-width <count>]\n"
                  "      [--candidates <count>] [--format <none|png>]\n"
-                 "      [--repair <none|consensus|png>] [--repair-report <file>] --output <file>\n"
+                 "      [--repair <none|consensus|png>] [--repair-report <file>]\n"
+                 "      [--trace-json <file>] --output <file>\n"
                  "\n"
                  "Commands:\n"
                  "  analyze      Find directional byte overlaps between fragment files\n"
@@ -140,7 +141,7 @@ int main(int argc, char* argv[])
                          "[--io <buffered|mmap>] "
                          "[--beam-width <count>] [--candidates <count>] "
                          "[--format <none|png>] [--repair <none|consensus|png>] "
-                         "[--repair-report <file>] --output <file>\n";
+                         "[--repair-report <file>] [--trace-json <file>] --output <file>\n";
             return 1;
         }
     }

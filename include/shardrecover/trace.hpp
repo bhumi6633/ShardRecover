@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <ostream>
 #include <span>
 #include <string>
 #include <vector>
@@ -113,5 +114,8 @@ public:
                                      const png::CrcRepairResult* png_repairs = nullptr,
                                      const png::AnalysisResult* png_analysis = nullptr);
 };
+
+void write_json(const ReconstructionTrace& trace, std::ostream& output);
+void write_json_file(const ReconstructionTrace& trace, const std::filesystem::path& path);
 
 }  // namespace shardrecover::trace
