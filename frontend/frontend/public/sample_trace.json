@@ -1,0 +1,14 @@
+{
+  "schema_version":1,
+  "engine":{"name":"ShardRecover","version":"0.1.0"},
+  "configuration":{"min_overlap":32,"max_mismatches":0,"graph_build":"indexed","threads":4,"strategy":"beam","beam_width":8,"io":"buffered","format":"png","repair":"none"},
+  "fragments":[{"id":0,"name":"shard_a3978fb9b92502a8.bin","size":61},{"id":1,"name":"shard_c151df7d6ee5e2d6.bin","size":64}],
+  "edges":[{"from":1,"to":0,"overlap":32,"matches":32,"mismatches":0,"exact":true,"mismatch_details":[]}],
+  "selected_path":[1,0],
+  "reconstruction":{"strategy":"beam","complete":true,"fragments_used":2,"fragments_total":2,"output_bytes":93,"approximate_joins":0,"overlap_mismatches":0},
+  "mismatches":[],
+  "repairs":[],
+  "unresolved_ambiguities":0,
+  "format":{"type":"png","signature_valid":true,"structurally_valid":true,"width":16,"height":16,"valid_crc_count":3,"invalid_crc_count":0,"all_crc_valid":true,"chunks":[{"index":0,"offset":8,"type":"IHDR","length":13,"crc_valid":true},{"index":1,"offset":33,"type":"IDAT","length":36,"crc_valid":true},{"index":2,"offset":81,"type":"IEND","length":0,"crc_valid":true}]},
+  "graph_stats":{"strategy":"indexed","theoretical_pairs":2,"candidate_pairs":1,"full_overlap_checks":1,"edges_created":1,"threads_used":4}
+}
