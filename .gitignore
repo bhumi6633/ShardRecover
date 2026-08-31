@@ -16,6 +16,7 @@ compile_commands.json
 .DS_Store
 frontend/node_modules/
 frontend/dist/
+frontend/*.tsbuildinfo
 Thumbs.db
 .idea/
 .vscode/
