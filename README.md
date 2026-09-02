@@ -4,15 +4,6 @@ ShardRecover is a C++20 engine for reconstructing files from shuffled, overlappi
 
 ## How it works
 
-```mermaid
-flowchart LR
-    A[Fragments] --> B[Overlap detection]
-    B --> C[FragmentGraph]
-    C --> D[Greedy or beam search]
-    D --> E[Optional repair]
-    E --> F[Recovered file and trace.json]
-    F --> G[React workstation]
-```
 
 Each fragment becomes a graph node. A directed edge records a suffix-to-prefix overlap, including its length and any observed byte disagreements. Reconstruction searches this graph for an ordered path and writes both the recovered bytes and, when requested, a versioned JSON trace.
 
@@ -82,4 +73,3 @@ It performs clean Release and sanitizer builds, CTest, bounded fuzzing when the 
 - [Fuzzing and sanitizers](docs/fuzzing.md)
 - [Demo walkthrough](docs/demo.md)
 
-`legacy/ece252_starter/` contains isolated course reference material and is not part of the active ShardRecover core.
